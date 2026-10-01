@@ -12,15 +12,24 @@ treat the *conclusions* as load-bearing and the *line numbers* as historical.
 Two findings in them were superseded during implementation and are recorded here so they are not
 re-discovered the hard way:
 
-1. **`ctx.connection.rpc.handle()` is unusable in the shipped 0.2.0 build.** Its `register` reads
-   `owner.webServer` through the *connection service's own* context, whose row injects only `webRuntime`,
-   so every caller gets `cannot get property "webServer" without inject`. Declaring `webServer` in the
-   plugin's own inject does not help — the read is not on the plugin's context. The working sibling is the
-   exact Fetch-route registry: `ctx.connection.fetch.register({ path: '/api/…', methods, requestBody, fetch })`
-   mounts under the same `/api` prefix, behind the same Host/Origin fence and browser authentication.
+1. **The edit channel is an exact Fetch route, not a generic RPC channel.** `ctx.connection.rpc.handle()`
+   mounts its physical route through `owner.webServer`, so a caller that does not declare `webServer` in
+   its own inject fails with `cannot get property "webServer" without inject`. `owner` *is* the calling
+   plugin's context — unloading the plugin disposes the route — so the fix would be a one-word inject
+   change; the exact Fetch-route registry was chosen instead because it needs no extra service while
+   mounting on the same authenticated `/api` surface:
+   `ctx.connection.fetch.register({ path: '/api/…', methods, requestBody, fetch })`, matched by
+   `createSharedFetchHandler('/api')` before the shared fallback.
+   *Correction:* an earlier draft of this note claimed the API was broken for every caller because the
+   read happened on the connection service's own context. That was wrong — it was this plugin's missing
+   `webServer` inject, and a cached module generation hid the fix from re-testing.
 2. **A shadowing entry must inherit the shipped entry's inject face.** The shipped `assistant-step`
    registration is `{ key: 'assistant-step', locale: NS, inject: () => ({ hooks: { presentation } }) }`.
    A shadow that supplies only its own inject face renders that view without `usePresentation`; the view
    throws on its first render, the entry is retired from its cell, and the transcript silently reverts to
    the shipped renderer. Copying the shipped entry's `inject(...)` result into the shadow's face — and
    keeping an error boundary around the delegated element — is what makes the takeover hold.
+3. **On 0.2.0 a keyed registration *replaces* the cell rather than shadowing it by priority.** The live
+   ledger shows the plugin's entries at `priority: 0` with the shipped entries for those keys gone
+   entirely, not retained beneath them. The practical consequence: capture the shipped entry from
+   `ctx.slots.entries()` **before** registering, because afterwards it is no longer in the ledger.

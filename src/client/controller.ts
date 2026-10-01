@@ -33,6 +33,17 @@ export interface EditRecord {
   editedAt: number
   /** True while the host has staged the edit for the next model step. */
   deferred: boolean
+  /** The edited message's own id, so an action that only knows the id can match. */
+  messageId?: string
+}
+
+/** What the host reports for one message addressed by its durable id. */
+interface MessageInfo {
+  originSeq: number
+  messageId?: string
+  kind: 'user' | 'assistant'
+  text: string
+  attachments?: readonly EditorAttachment[]
 }
 
 /** The message currently open in the inline editor. */
@@ -111,19 +122,32 @@ export class MessageEditorController {
   private tail: Promise<unknown> = Promise.resolve()
   private disposed = false
   private noticeTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly call: (endpoint: string, payload: unknown) => Promise<EditorEnvelope>
+  private readonly sessionId: string
+  private readonly t: (key: string) => string
+  private readonly onNotice: (message: string, isError: boolean) => void
 
   /**
+   * Fields are assigned in the body rather than declared as constructor
+   * parameters, so the class stays plain enough to load under Node's
+   * strip-only TypeScript mode — which is what lets the tests exercise it
+   * directly without a build step.
    * @param call - the host channel caller.
    * @param sessionId - the Session owning every addressed message.
    * @param t - this plugin's translate seat.
    * @param onNotice - sink for transient success/failure toasts.
    */
   constructor(
-    private readonly call: (endpoint: string, payload: unknown) => Promise<EditorEnvelope>,
-    private readonly sessionId: string,
-    private readonly t: (key: string) => string,
-    private readonly onNotice: (message: string, isError: boolean) => void = () => {},
-  ) {}
+    call: (endpoint: string, payload: unknown) => Promise<EditorEnvelope>,
+    sessionId: string,
+    t: (key: string) => string,
+    onNotice: (message: string, isError: boolean) => void = () => {},
+  ) {
+    this.call = call
+    this.sessionId = sessionId
+    this.t = t
+    this.onNotice = onNotice
+  }
 
   /** Current frozen view (uSES getSnapshot). */
   getSnapshot = (): EditorView => this.view
@@ -134,14 +158,24 @@ export class MessageEditorController {
     return () => { this.listeners.delete(listener) }
   }
 
+  // ---------------------------------------------------------------------
+  // Verbs.
+  //
+  // These are ARROW PROPERTIES on purpose. They are handed to presentational
+  // components as bare callbacks (`onSave: editor.save`), so a prototype method
+  // would lose its receiver and throw on `this.view` — the editor would open and
+  // then refuse to type, save, or close. Binding at the definition removes that
+  // whole class of mistake for every call site, present and future.
+  // ---------------------------------------------------------------------
+
   /** Seed once; a failed load stays retryable. */
-  ensure(): Promise<EditorActionResult> {
+  ensure = (): Promise<EditorActionResult> => {
     if (this.view.status === 'ready') return Promise.resolve(OK)
     return this.refresh()
   }
 
   /** Re-read the authoritative edit table, collapsing concurrent callers. */
-  refresh(): Promise<EditorActionResult> {
+  refresh = (): Promise<EditorActionResult> => {
     if (this.loadPromise !== null) return this.loadPromise
     this.publish({ ...this.view, status: 'loading' })
     const pending = this.load()
@@ -153,12 +187,12 @@ export class MessageEditorController {
    * Open the inline editor for one message.
    * @param input - the message identity plus the text/attachments it starts from.
    */
-  begin(input: {
+  begin = (input: {
     originSeq: number
     kind: 'user' | 'assistant'
     text: string
     attachments: readonly EditorAttachment[]
-  }): void {
+  }): void => {
     void this.ensure()
     this.publish({
       ...this.view,
@@ -173,21 +207,63 @@ export class MessageEditorController {
     })
   }
 
+  /**
+   * Open the editor for a message addressed only by its id.
+   *
+   * The host owns the id → surface-seq resolution, so an action that receives
+   * nothing but a `messageId` needs no conversation snapshot at all.
+   * @param messageId - the message to edit.
+   * @returns the settled result once the editor is open.
+   */
+  beginForMessage = (messageId: string): Promise<EditorActionResult> => {
+    return this.mutate(async () => {
+      for (const record of this.view.edits.values()) {
+        if (record.messageId !== messageId) continue
+        this.begin({
+          originSeq: record.originSeq,
+          kind: record.kind,
+          text: record.text,
+          attachments: [],
+        })
+        return OK
+      }
+      const result = await this.callHost('read', { sessionId: this.sessionId, messageId })
+      if (!result.ok) {
+        this.publish({ ...this.view, error: result.error })
+        this.toast(result.error, true)
+        return result
+      }
+      const info = (result.value ?? {}) as Partial<MessageInfo>
+      if (typeof info.originSeq !== 'number') {
+        const message = this.t('error.target-not-found')
+        this.publish({ ...this.view, error: message })
+        return { ok: false, error: message }
+      }
+      this.begin({
+        originSeq: info.originSeq,
+        kind: info.kind === 'assistant' ? 'assistant' : 'user',
+        text: typeof info.text === 'string' ? info.text : '',
+        attachments: Array.isArray(info.attachments) ? info.attachments : [],
+      })
+      return OK
+    })
+  }
+
   /** Close the inline editor without saving. */
-  cancel(): void {
+  cancel = (): void => {
     if (this.view.editing === null) return
     this.publish({ ...this.view, editing: null, error: null })
   }
 
   /** Replace the draft text. */
-  setText(text: string): void {
+  setText = (text: string): void => {
     const editing = this.view.editing
     if (editing === null) return
     this.publish({ ...this.view, editing: { ...editing, text } })
   }
 
   /** Toggle one attachment between kept and removed in the draft. */
-  toggleAttachment(id: string): void {
+  toggleAttachment = (id: string): void => {
     const editing = this.view.editing
     if (editing === null) return
     const removed = new Set(editing.removed)
@@ -197,7 +273,7 @@ export class MessageEditorController {
   }
 
   /** Commit the open draft through the host. */
-  save(): Promise<EditorActionResult> {
+  save = (): Promise<EditorActionResult> => {
     const editing = this.view.editing
     if (editing === null) return Promise.resolve(OK)
     const text = editing.text
@@ -225,7 +301,7 @@ export class MessageEditorController {
   }
 
   /** Restore one edited message to its logged original. */
-  revert(originSeq: number): Promise<EditorActionResult> {
+  revert = (originSeq: number): Promise<EditorActionResult> => {
     return this.mutate(async () => {
       const result = await this.callHost('revert', { sessionId: this.sessionId, originSeq })
       if (!result.ok) {
@@ -241,7 +317,7 @@ export class MessageEditorController {
   }
 
   /** Drop subscribers and stop publishing when the owning fiber unloads. */
-  dispose(): void {
+  dispose = (): void => {
     this.disposed = true
     if (this.noticeTimer !== null) clearTimeout(this.noticeTimer)
     this.listeners.clear()

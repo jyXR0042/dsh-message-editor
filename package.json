@@ -59,7 +59,7 @@
     "build": "node scripts/build.mjs",
     "check:bundle": "node scripts/check-bundle.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test tests/host.test.mjs tests/harness.test.mjs",
+    "test": "node --test tests/host.test.mjs tests/harness.test.mjs tests/controller.test.mjs",
     "check:host": "node scripts/check-host.mjs",
     "verify": "npm run typecheck && npm run test && npm run build && npm run check:bundle && npm run check:host"
   },

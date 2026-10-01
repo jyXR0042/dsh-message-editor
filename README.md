@@ -11,6 +11,7 @@ Edit any past message in a [DeepSeek Harness](https://github.com/deepseek-ai/dee
 ## What it does
 
 - **A pencil on every message.** Assistant replies carry one in the host's own action strip, next to copy / branch / rating. User messages carry one in their own bubble row. Both are the same 28px round ghost button the host uses, on `--dsw-alias-*` tokens, so they read as first-party chrome.
+  - *Where to look:* the assistant pencil sits in the **turn footer row under a completed reply**, beside the copy button — the same row that holds branch and rating. That row follows the host's own reveal rule, so it may only appear when you hover the turn. User messages show their pencil directly under the bubble, next to copy.
 - **Edit in place.** The message body becomes an inline editor — a bordered card on the layer-1 surface, a capsule Save / Cancel pair, `Enter` to save, `Shift+Enter` for a newline, `Escape` to cancel. Nothing is regenerated, so nothing restarts, streams, or costs tokens.
 - **Attachments too.** A user message's image and file chips are listed above the field; toggling one marks it removed, and saving drops that block from the message the model sees.
 - **Undo.** An edited message shows an `Edited` marker and a revert control that restores the logged original.

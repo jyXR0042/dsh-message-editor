@@ -3,114 +3,74 @@
  * strip (`conversation.chat.assistant-actions`).
  *
  * This is the sanctioned placement: the strip already renders copy, branch and
- * the feedback pair between them, so the pencil inherits that row's geometry
- * and hover behaviour exactly — the same affordance the reference chat client
- * puts beside a message, drawn in the host's own chrome.
+ * the feedback pair between them, so the pencil inherits that row's geometry and
+ * hover behaviour exactly — the same affordance the reference chat client puts
+ * beside a message, drawn in the host's own chrome.
  *
- * The strip's owner hands over a `messageId`; the transcript node that owns the
- * message is resolved from the live conversation snapshot, because the edit is
- * keyed by the message's append-origin surface seq.
+ * The strip's owner hands over a `messageId` and nothing else. Resolving that to
+ * a surface node is the host's job, so this component reads no conversation
+ * snapshot at all: it opens the editor through `beginForMessage` and matches the
+ * edited state by id.
  *
  * @module dsh-message-editor/client/assistant-action
  */
 
-import { createElement as h, useCallback, useMemo } from 'react'
+import { createElement as h, useCallback } from 'react'
 import { IconEdit, IconRevert } from './icons.tsx'
-import { assistantOriginSeq } from './assistant-node.tsx'
-import type { EditorView } from './controller.ts'
+import type { EditRecord, EditorView } from './controller.ts'
 
 /** The injected face available at the assistant action strip. */
 export interface ActionInjected {
   useEditor?: <S>(selector: (view: EditorView) => S) => S
   controller?: {
-    begin: (input: {
-      originSeq: number
-      kind: 'user' | 'assistant'
-      text: string
-      attachments: readonly { id: string; name: string }[]
-    }) => void
-    revert: (originSeq: number) => void
+    beginForMessage: (messageId: string) => Promise<unknown>
+    revert: (originSeq: number) => Promise<unknown>
   }
   fallbackT: (key: string) => string
 }
 
-/** Props the strip's owner shares, plus the injected face and the session kit. */
+/** Props the strip's owner shares, plus the injected face. */
 export interface ActionProps extends ActionInjected {
   messageId?: string
   t?: (key: string, params?: Record<string, unknown>) => string
-  useSession?: <S>(selector: (snapshot: unknown) => S) => S
 }
 
 /** Selector default so the hook order never depends on wiring. */
 const NO_EDITOR = <S,>(_selector: (view: EditorView) => S): S | undefined => undefined
 
-/** Snapshot default: no session kit means no addressable message. */
-const NO_SESSION = <S,>(_selector: (snapshot: unknown) => S): S | undefined => undefined
-
-/** One resolved assistant step: its append-origin seq and visible plain text. */
-interface ResolvedStep {
-  originSeq: number
-  text: string
-}
-
-/** Resolve `messageId` to the assistant step that owns it. */
-function findAssistantStep(snapshot: unknown, messageId: string | undefined): ResolvedStep | undefined {
-  if (messageId === undefined || snapshot === undefined || snapshot === null) return undefined
-  const chat = (snapshot as { chat?: { order?: readonly string[]; nodes?: { get?: (key: string) => unknown } } })?.chat
-  const order = chat?.order
-  const nodes = chat?.nodes
-  if (!Array.isArray(order) || typeof nodes?.get !== 'function') return undefined
-  for (const key of order) {
-    const node = nodes.get(key) as { kind?: string; anchorSeq?: number; data?: Record<string, unknown> } | undefined
-    if (node?.kind !== 'assistant-step') continue
-    const finalNode = node.data?.['finalNode'] as { messageId?: string } | undefined
-    if (finalNode?.messageId !== messageId) continue
-    const originSeq = assistantOriginSeq(node)
-    if (originSeq === undefined) continue
-    const blocks = Array.isArray(node.data?.['blocks']) ? (node.data?.['blocks'] as readonly unknown[]) : []
-    let text = ''
-    for (const block of blocks) {
-      const typed = block as { kind?: string; text?: string }
-      if (typed?.kind === 'text' && typeof typed.text === 'string') text += typed.text
-    }
-    return { originSeq, text }
+/** The committed edit of one message id, if any. */
+function editOf(view: EditorView, messageId: string | undefined): EditRecord | undefined {
+  if (messageId === undefined) return undefined
+  for (const record of view.edits.values()) {
+    if (record.messageId === messageId) return record
   }
   return undefined
 }
 
 /**
  * Render the assistant strip's edit affordance.
- * @param props - the addressed message, the session snapshot hook, and the
- * injected face.
+ * @param props - the addressed message and the injected face.
  * @returns the pencil, plus a revert control and badge once the message is edited.
  */
 export function AssistantEditAction(props: ActionProps) {
   const t = typeof props.t === 'function' ? props.t : (key: string) => props.fallbackT(key)
-  const selectSession = props.useSession ?? NO_SESSION
-  const selectEdit = props.useEditor ?? NO_EDITOR
   const controller = props.controller
   const messageId = props.messageId
 
-  // The snapshot reference is stable between conversation changes, so this
-  // selector re-renders the strip only when the transcript actually moved.
-  const snapshot = selectSession((value: unknown) => value)
-  const step = useMemo(() => findAssistantStep(snapshot, messageId), [snapshot, messageId])
-  const originSeq = step?.originSeq
-
-  const edit = selectEdit((view) => (originSeq === undefined ? undefined : view.edits.get(originSeq)))
-  const pending = selectEdit((view) => view.pending) === true
+  const select = props.useEditor ?? NO_EDITOR
+  // The selector returns an existing record (or undefined), never a fresh value,
+  // so it stays uSES-safe across unrelated renders.
+  const edit = select((view) => editOf(view, messageId))
+  const pending = select((view) => view.pending) === true
 
   const onEdit = useCallback(() => {
-    if (step === undefined || controller === undefined) return
-    controller.begin({
-      originSeq: step.originSeq,
-      kind: 'assistant',
-      text: step.text,
-      attachments: [],
-    })
-  }, [controller, step])
+    if (messageId === undefined || controller === undefined) return
+    void controller.beginForMessage(messageId)
+  }, [controller, messageId])
 
-  if (originSeq === undefined || controller === undefined) return null
+  // The strip renders for one finalized message; without an addressable id there
+  // is nothing to edit, and rendering nothing keeps the row unchanged.
+  if (messageId === undefined || messageId === '' || controller === undefined) return null
 
   return h('div', { className: 'dme-actions' },
     h('button', {
@@ -128,7 +88,7 @@ export function AssistantEditAction(props: ActionProps) {
       'aria-label': t('action.revert'),
       title: t('action.revert'),
       disabled: pending,
-      onClick: () => { controller.revert(originSeq) },
+      onClick: () => { void controller.revert(edit.originSeq) },
     }, h(IconRevert)),
     edit !== undefined && h('span', { className: 'dme-badge' },
       h('span', { className: 'dme-badge-dot', 'aria-hidden': true }),

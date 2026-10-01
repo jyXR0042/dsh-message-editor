@@ -58,8 +58,16 @@ interface AssistantBlock {
   block?: unknown
 }
 
-/** The append-origin seq of an assistant step, from its finalized message. */
+/**
+ * The append-origin seq of an assistant step.
+ *
+ * `anchorSeq` is the field every chat node carries, and a settled assistant step
+ * anchors on its own `assistant/message` event — the coordinate the host keys an
+ * edit by. `finalNode.seq` carries the same value once the step is finalized, so
+ * it serves only as a fallback for a node projected an older way.
+ */
 export function assistantOriginSeq(node: NodeProps['node']): number | undefined {
+  if (typeof node?.anchorSeq === 'number') return node.anchorSeq
   const finalNode = node?.data?.['finalNode'] as { seq?: number } | undefined
   if (typeof finalNode?.seq === 'number') return finalNode.seq
   return typeof node?.anchorSeq === 'number' ? node.anchorSeq : undefined

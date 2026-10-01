@@ -26,7 +26,7 @@ jobs:
       - name: Typecheck the browser half
         run: pnpm typecheck
 
-      - name: Host log-rewriting and channel tests
+      - name: Host log-rewriting, channel, and client edit-layer tests
         run: pnpm test
 
       - name: Build the browser half

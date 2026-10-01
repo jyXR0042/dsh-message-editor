@@ -350,3 +350,78 @@ test('a target that left the surface is reported, not silently rewritten', async
   assert.equal(applied.ok, false)
   assert.equal(applied.error.code, 'target-not-found')
 })
+
+// The assistant action strip is handed a durable `messageId` and nothing else,
+// so the id → surface-coordinate resolution has to work on the host.
+
+test('read resolves a message id to its append-origin seq and current text', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+
+  const user = await harness.call('read', { sessionId: 'session-1', messageId: 'u1' })
+  assert.equal(user.ok, true, JSON.stringify(user))
+  assert.equal(user.value.originSeq, 2)
+  assert.equal(user.value.kind, 'user')
+  assert.equal(user.value.text, 'original question')
+
+  const assistant = await harness.call('read', { sessionId: 'session-1', messageId: 'a1' })
+  assert.equal(assistant.ok, true, JSON.stringify(assistant))
+  assert.equal(assistant.value.originSeq, 3)
+  assert.equal(assistant.value.kind, 'assistant')
+  assert.equal(assistant.value.text, 'original answer')
+})
+
+test('read reports the edited text once the message has been rewritten', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  await harness.call('apply', { sessionId: 'session-1', originSeq: 3, text: 'corrected answer' })
+
+  const after = await harness.call('read', { sessionId: 'session-1', messageId: 'a1' })
+  assert.equal(after.ok, true, JSON.stringify(after))
+  // The origin seq is stable across the rewrite, so the same id keeps resolving.
+  assert.equal(after.value.originSeq, 3)
+  assert.equal(after.value.text, 'corrected answer')
+})
+
+test('read lists an attachment chip for every removable block', async () => {
+  const session = new FakeSession()
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('user/message', {
+    id: 'u1',
+    role: 'user',
+    content: [
+      { type: 'text', text: 'see' },
+      { type: 'image', attachment: { attachmentId: 'i1', mediaType: 'image/png', bytes: 1, width: 1, height: 1, name: 'a.png' } },
+    ],
+    source: { kind: 'user' },
+  }, { surfaceOp: 'append' })
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+
+  const read = await harness.call('read', { sessionId: 'session-1', messageId: 'u1' })
+  assert.deepEqual(read.value.attachments, [{ id: 'i1', name: 'a.png' }])
+})
+
+test('every edit record carries the message id it belongs to', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  await harness.call('apply', { sessionId: 'session-1', originSeq: 2, text: 'edited question' })
+
+  const listed = await harness.call('list', { sessionId: 'session-1' })
+  assert.equal(listed.value.edits.length, 1)
+  assert.equal(listed.value.edits[0].messageId, 'u1')
+  assert.equal(listed.value.edits[0].originSeq, 2)
+})
+
+test('read refuses an unknown message id', async () => {
+  const harness = makeCtx(seed())
+  plugin.apply(harness.ctx)
+  const read = await harness.call('read', { sessionId: 'session-1', messageId: 'nope' })
+  assert.equal(read.ok, false)
+  assert.equal(read.error.code, 'target-not-found')
+  assert.equal((await harness.call('read', { sessionId: 'session-1' })).error.code, 'bad-request')
+})
