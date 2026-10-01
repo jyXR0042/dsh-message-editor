@@ -1,0 +1,93 @@
+# dsh-message-editor
+
+[English](README.md) | 中文
+
+在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的对话里直接修改任意一条历史消息 —— 模型输出的文本、你自己输入的文本，以及附件。**默认冷修改：不重新生成。** 对话里显示的就是修改后的内容，后续模型调用读到的也是修改后的内容。
+
+<p align="center">
+  <img src="icon.svg" width="72" alt="">
+</p>
+
+## 功能
+
+- **每条消息都有编辑按钮。** 模型回复的按钮挂在宿主自己那条操作栏里，和复制 / 分支 / 点赞并排；用户消息的按钮画在气泡自己的操作行里。两者都是宿主在用的那套样式：28px 圆形幽灵按钮、只用 `--dsw-alias-*` 主题变量，看起来就是原生功能。
+- **就地编辑。** 消息正文原地变成一个内联编辑器：layer-1 表面上的描边卡片，胶囊形的「保存 / 取消」，`Enter` 保存、`Shift+Enter` 换行、`Esc` 取消。全程不触发重新生成，不重新流式输出，不消耗 token。
+- **附件也能改。** 用户消息里的图片和文件会显示成附件标签，点一下标记为移除，保存后这个内容块就不会再进入模型上下文。
+- **可撤销。** 改过的消息会显示「已修改」标记和撤销按钮，一键恢复日志里的原文。
+- **持久、可回放。** 修改是会话日志里的一次追加事件，不是原地改写。刷新、恢复、fork、回放都保留，原文永远不会被破坏。
+
+## 实现原理
+
+会话日志只追加不修改，而 Harness 在它之上渲染两个不同的视图：
+
+- **模型可见表层**：一次折叠，每条消息解析为当前遮蔽它的那个节点；
+- **人类对话记录**：只接收 append 来源的事件，这样一次替换就不会抹掉你已经读过的对话。
+
+本插件写第一个视图，画第二个视图。
+
+1. **改写 = 表层替换（surface replacement）。** 编辑时会追加一条新的 `user/message` / `assistant/message` 事件，带上 `surfaceOp: { op: 'replace', startSeq, endSeq }`，于是表层折叠遮蔽原节点，原文继续留在日志里。这正是上下文压缩和工具结果裁剪已经在用的机制；而 `Session.deriveMessages()` 会在每个模型步骤开始时重新折叠日志，所以**一次追加就永久生效**。消息历史不存在请求期拦截点，也不需要。
+2. **对话记录由被接管的渲染器绘制。** `conversation.chat.node` 是 keyed 槽位，因此本插件接管 `user`、`steering`、`assistant-step` 三个格子。用户气泡自己画；模型步骤则**委托**给宿主原有的 Markdown 渲染器，只换掉节点数据 —— 没改过的回复和原版一模一样，改过的回复依然保留完整的 Markdown、代码高亮和思考过程渲染。
+3. **两端通过一条带鉴权的路由通信。** 主进程在 connection 的 `/api` 面上挂一条精确 Fetch 路由，浏览器端用同源 `fetch` 调用，因此每次修改都经过和整个应用相同的 Host/Origin 围栏与浏览器鉴权。不需要生成 Remote 产物，不需要 zod contribution，不需要代码生成。
+
+改写逻辑刻意保守，因为消息历史会真的被送去请求模型：
+
+- 所有非文本块原样保留 —— 尤其是模型消息里的 `tool-call` 块，否则配对的 `tool/result` 会变成孤儿，下一次请求会被服务端拒绝；
+- 模型消息的替换会**丢弃 `usage`**，因为 token 折叠读的是原始日志，否则历史步骤会被重复计费；
+- 消息的 `id`、`role`、`source` 全部保留（日志加载路径要求如此）；
+- 上下文压缩事务开启期间拒绝编辑。
+
+## 安装
+
+本插件是一个 **bundle**：`package.json` 声明 `dsh.bundle.patch`，由补丁插入一条 host row；浏览器端通过 `exports["./client"]` 自动挂载。
+
+**网页端** —— 侧边栏 → **插件** → **添加插件** → 填入本仓库地址或本地路径，勾选信任，**安装**。
+
+**Agent 会话里** —— `plugin_manager` → `install_bundle`，target 传包目录、git 地址或 npm 规格。
+
+**验证** —— 插件页面里 `dsh-message-editor` 显示为已启用，消息操作栏里出现铅笔按钮。
+
+### 安装或更新后需要重启一次
+
+一个**从未被加载过**的 bundle 可以靠 HMR 直接激活；但**替换一个已经安装过的包必须重启进程**，因为 host 端是一个 JavaScript 模块，运行中的进程会一直持有它第一次加载的那一代代码。这是 Harness 的既有行为，不是本插件的怪癖：
+
+> Installing a new bundle can activate through HMR; replacing an installed package requires restart to load a fresh JavaScript module generation.
+
+所以首次安装**新版本**之后请重启应用。全新环境下第一次安装会立即生效。
+
+## 已知限制
+
+- **只支持已载入的会话。** 替换事件要通过 live `Session.append` 追加，因此需要会话处于活动状态。未载入的会话会返回一个明确的拒绝，而不是往日志里写一条 Harness 尚未校验的记录。先发一条消息恢复会话，再编辑。
+- **模型消息的步骤范围。** `user/message` 替换任何时刻都合法，所以改用户消息会进入紧接着的那次请求；而 `assistant/message` 替换受 Harness 自己的关系规则限制，是「步骤内」事件。插件会在步骤打开时立即落盘，否则暂存到下一个模型步骤，并把消息标成「已修改 · 下一步生效」。在出厂配置下立即路径总是成功，暂存路径实际上是休眠的。
+- **一次编辑一个字符串。** 一条消息里的多个文本块在保存时会合并到第一个；思考、图片、文件、工具调用块保持原有顺序和内容。因此编辑可能让文本相对工具调用移动位置（这是有意为之），但无法重排非文本块。
+- **附件目前只能删，不能加。** 从历史消息里移除附件已经可用；给历史消息新增文件需要走上传管线，本版本刻意不做。
+- **同一 Harness 只能装一份。** host 端挂的是固定路由路径，两份实例不能同时激活。
+- **面向 `@deepseek-ai/dsh` 0.2.0-rc.2 构建。** 本插件不声明任何 `@deepseek-ai/dsh-*` peer dependency —— Harness 会用运行时精确版本校验它们，范围不对会直接拒绝安装。它只通过 `ctx.sessions` 和 `ctx.connection` 与主进程通信，并且同时兼容两种 `surfaceOp` 写法（`startSeq`/`endSeq` 与更早的 `start`/`end`），因此在相近版本间应当可以继续工作。
+
+## 开发
+
+```bash
+pnpm install
+pnpm typecheck     # 对浏览器端做 tsc 检查
+pnpm test          # host 端日志改写逻辑 + 完整 host 测试台
+pnpm build         # esbuild → lib/client.js
+```
+
+目录：
+
+| 路径 | 说明 |
+|---|---|
+| `index.js` | host 入口，转发到 `lib/host.js` |
+| `lib/host.js` | host 端：编辑路由、表层替换、暂存的模型消息落盘 |
+| `src/client/**` | 浏览器端源码，构建成 `lib/client.js` |
+| `tests/**` | host 逻辑单测与端到端 host 测试台 |
+| `docs/research/**` | 本设计所依据的接缝调研 |
+
+`lib/` 是**故意提交进仓库**的：Harness 会原样提供浏览器端文件，从不构建它。
+
+### 验证一次改动
+
+`pnpm test` 用一个遵守真实追加契约（表层标记、替换范围、来源引用）的 `Session` 替身来覆盖日志改写逻辑。浏览器端通过实时槽位树验证 —— `cordis_inspect_query` → client `Slots` → 对 `conversation.chat.node` 调 `listSubTree`，应当看到本插件的条目赢下 `user`、`steering`、`assistant-step` 三个格子。
+
+## 许可证
+
+[MIT](LICENSE)

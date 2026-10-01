@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck the browser half
+        run: pnpm typecheck
+
+      - name: Host log-rewriting and channel tests
+        run: pnpm test
+
+      - name: Build the browser half
+        run: pnpm build
+
+      - name: Bundle contract
+        run: pnpm check:bundle
+
+      - name: Host entry contract
+        run: pnpm check:host
+
+      # The harness serves lib/client.js verbatim and never builds it, so a
+      # stale artifact is the one failure that only appears at runtime.
+      - name: The committed bundle matches the sources
+        run: git diff --exit-code -- lib/client.js

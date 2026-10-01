@@ -1,0 +1,71 @@
+{
+  "name": "dsh-message-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Edit any past message in a DeepSeek Harness conversation in place — cold edit, no regeneration. Text and attachments, for both user and assistant messages.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "chat",
+    "message",
+    "edit"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "lib/host.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "lib/client.d.ts",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "dependencies": {},
+  "peerDependencies": {},
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test tests/host.test.mjs tests/harness.test.mjs",
+    "check:host": "node scripts/check-host.mjs",
+    "verify": "npm run typecheck && npm run test && npm run build && npm run check:bundle && npm run check:host"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "@types/react": "^18.3.0"
+  }
+}

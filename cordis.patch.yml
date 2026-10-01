@@ -1,0 +1,18 @@
+# dsh-message-editor — bundle layer.
+#
+# One host row. The browser half attaches automatically: the client scanner
+# resolves `dsh.client` in this package's package.json and serves the bytes at
+# `exports["./client"]`, so no second row is needed.
+#
+# The row `name` MUST be the bare package name — a subpath row (`pkg/startup`)
+# never receives a client half.
+#
+# `inject` is repeated here so a hand-written patch that composes this bundle by
+# row rather than by manifest still activates it. The plugin only needs the live
+# session store and the authenticated `/api` surface it mounts its route on.
+- insert:
+    - id: dsh-message-editor
+      name: dsh-message-editor
+      inject:
+        - sessions
+        - connection

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Message Editor",
+    "description": "Rewrite any message in the conversation — user input or model output — as a cold edit. Nothing is regenerated; text and attachments are editable."
+  }
+}

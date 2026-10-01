@@ -1,0 +1,10 @@
+# Keep the tree byte-stable across platforms.
+#
+# `lib/client.js` is a build artifact that the harness serves verbatim and CI
+# compares against a fresh build, so an end-of-line rewrite would break both.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.webp binary
+*.tgz binary

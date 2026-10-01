@@ -1,0 +1,18 @@
+# Dependencies and build scratch
+node_modules/
+*.tsbuildinfo
+.pnpm-store/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# NOTE: lib/ is intentionally COMMITTED.
+#
+# The installed harness serves `exports["./client"]` byte for byte and never
+# bundles a third-party browser half, so a clone that has not been built cannot
+# load. Shipping the built artifacts is what makes a plain git install work
+# without running a build script.
