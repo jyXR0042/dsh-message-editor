@@ -39,6 +39,7 @@ export interface NodeInjected {
     setText: (text: string) => void
     toggleAttachment: (id: string) => void
     save: () => void
+    saveAndRegenerate: () => void
     revert: (originSeq: number) => void
   }
   /** The host's own `conversation` translate, used when delegating a renderer. */
@@ -109,6 +110,11 @@ export function EditedUserMessageView(props: NodeProps) {
   )) ?? null
   const pending = useEditor((view: EditorView) => view.pending) === true
   const error = useEditor((view: EditorView) => view.error) ?? null
+  // A regenerate replaces the edited question together with the answers that
+  // followed it, so those answers leave the transcript too.
+  const hidden = useEditor((view: EditorView) => (
+    originSeq === undefined ? false : view.hidden.has(originSeq)
+  )) === true
 
   const [copied, setCopied] = useState(false)
   const copyPending = useRef(false)
@@ -205,6 +211,9 @@ export function EditedUserMessageView(props: NodeProps) {
       h('span', { className: 'dme-badge-dot', 'aria-hidden': true }),
       t(badgeKey)))
 
+  // Drawn after every hook has run, so the hook order is unconditional.
+  if (hidden) return null
+
   return h('div', { className: 'dme-user-row', 'data-time-hover-root': true },
     h('div', { className: 'dme-user-stack' },
       images.length > 0 && h('div', { className: 'dme-images' },
@@ -223,6 +232,7 @@ export function EditedUserMessageView(props: NodeProps) {
           onToggleAttachment: controller.toggleAttachment,
           onSave: controller.save,
           onCancel: controller.cancel,
+          onSaveRegenerate: controller.saveAndRegenerate,
         })
         : (text !== '' || rest.length > 0) && h('div', { className: 'dme-bubble' },
           h('div', { className: 'dme-text' }, ...projectUserText(text)),

@@ -25,10 +25,12 @@ import type { EditingState } from './controller.ts'
  * @param props.onToggleAttachment - one attachment toggled.
  * @param props.onSave - commit.
  * @param props.onCancel - discard.
+ * @param props.onSaveRegenerate - commit and have the model answer again; omitted
+ *   where the message has no reply of its own to redo.
  * @returns the editor element.
  */
 export function InlineEditor({
-  editing, t, pending, error, onText, onToggleAttachment, onSave, onCancel,
+  editing, t, pending, error, onText, onToggleAttachment, onSave, onCancel, onSaveRegenerate,
 }: {
   editing: EditingState
   t: (key: string, params?: Record<string, unknown>) => string
@@ -38,6 +40,7 @@ export function InlineEditor({
   onToggleAttachment: (id: string) => void
   onSave: () => void
   onCancel: () => void
+  onSaveRegenerate?: (() => void) | undefined
 }) {
   const area = useRef<HTMLTextAreaElement | null>(null)
 
@@ -111,9 +114,20 @@ export function InlineEditor({
           disabled: pending,
           onClick: onCancel,
         }, t('editor.cancel')),
+        // The cold edit stays the default; regenerating is the deliberate
+        // second choice, so it sits beside Save without taking its emphasis.
+        onSaveRegenerate !== undefined && h('button', {
+          type: 'button',
+          className: 'dme-btn',
+          'data-message-editor': 'save-regenerate',
+          title: t('editor.hint.regenerate'),
+          disabled: pending,
+          onClick: onSaveRegenerate,
+        }, t('editor.saveRegenerate')),
         h('button', {
           type: 'button',
           className: 'dme-btn',
+          'data-message-editor': 'save',
           'data-variant': 'primary',
           disabled: pending,
           onClick: onSave,

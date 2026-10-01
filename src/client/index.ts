@@ -18,6 +18,7 @@ import { MessageEditorController } from './controller.ts'
 import { createEditorChannel } from './channel.ts'
 import { EditedUserMessageView } from './user-node.tsx'
 import { EditedAssistantStepView } from './assistant-node.tsx'
+import { EditedContextNodeView } from './context-node.tsx'
 import { AssistantEditAction } from './assistant-action.tsx'
 import { NS, en, zh } from './locales.ts'
 import { installStyles } from './styles.ts'
@@ -241,9 +242,13 @@ export function apply(ctx: ClientContext): void {
       user: captureEntry(ctx.slots, 'user'),
       steering: captureEntry(ctx.slots, 'steering'),
       'assistant-step': captureEntry(ctx.slots, 'assistant-step'),
+      context: captureEntry(ctx.slots, 'context'),
     }
     if (shipped['assistant-step'] === undefined) {
       console.warn('[dsh-message-editor] shipped assistant renderer not found; using the self-contained body')
+    }
+    if (shipped.context === undefined) {
+      console.warn('[dsh-message-editor] shipped context renderer not found; injected context rows will not render')
     }
 
     /**
@@ -275,6 +280,7 @@ export function apply(ctx: ClientContext): void {
             controller,
             conversationT,
             fallbackT,
+            pluginId: name,
             builtinNode: cell?.component,
           }
         },
@@ -290,6 +296,7 @@ export function apply(ctx: ClientContext): void {
       take('user', markShadow(EditedUserMessageView)),
       take('steering', markShadow(EditedUserMessageView)),
       take('assistant-step', markShadow(EditedAssistantStepView)),
+      take('context', markShadow(EditedContextNodeView)),
     ]
     return () => {
       for (const dispose of disposers) {

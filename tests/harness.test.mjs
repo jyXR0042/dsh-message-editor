@@ -77,11 +77,17 @@ class FakeSession {
 function makeCtx(session) {
   const listeners = new Map()
   const flushed = []
+  const followups = []
   let route
   const ctx = {
     sessions: {
       get: (id) => (session !== undefined && session.id === id ? session : undefined),
       flush: async (target) => { flushed.push(target.id); return true },
+    },
+    agents: {
+      get: (id) => (session !== undefined && session.id === id
+        ? { session, followup: (message) => { followups.push(message) } }
+        : undefined),
     },
     connection: {
       // The exact Fetch-route registry — the working sibling of this build's
@@ -100,6 +106,7 @@ function makeCtx(session) {
   return {
     ctx,
     flushed,
+    followups,
     routeOf: () => route,
     call: async (endpoint, payload) => {
       assert.ok(route !== undefined, 'the plugin registered no fetch route')
@@ -424,4 +431,91 @@ test('read refuses an unknown message id', async () => {
   assert.equal(read.ok, false)
   assert.equal(read.error.code, 'target-not-found')
   assert.equal((await harness.call('read', { sessionId: 'session-1' })).error.code, 'bad-request')
+})
+
+// ---- regenerate -----------------------------------------------------------
+
+test('a regenerate edit spans the stale reply and wakes the session', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+
+  const applied = await harness.call('apply', {
+    sessionId: 'session-1',
+    originSeq: 2,
+    text: 'edited question',
+    regenerate: true,
+    instruction: 'answer again please',
+  })
+  assert.equal(applied.ok, true, JSON.stringify(applied))
+
+  // One replacement covers the question AND the answer that followed it, so the
+  // model is not asked to redo an answer it can still see. The trigger itself
+  // only enters the inbox, so the replacement is the log's last event.
+  const replacement = session.log.at(-1)
+  assert.equal(replacement.type, 'user/message')
+  assert.deepEqual(replacement.surfaceOp, { op: 'replace', startSeq: 2, endSeq: 3 })
+  assert.deepEqual([...replacement.sourceEventSeqs].sort((a, b) => a - b), [2, 3])
+  assert.equal(replacement.data.content[0].text, 'edited question')
+
+  // The record tells the transcript which replies to drop.
+  assert.deepEqual(applied.value.record.hiddenSeqs, [3])
+  assert.deepEqual(applied.value.hidden, [3])
+
+  // And the session was woken with a plugin-sourced trigger, which the client's
+  // `context` renderer hides.
+  assert.equal(harness.followups.length, 1)
+  const trigger = harness.followups[0]
+  assert.equal(trigger.role, 'user')
+  assert.equal(trigger.source.plugin, 'message-editor')
+  assert.equal(trigger.content[0].text, 'answer again please')
+})
+
+test('a regenerate without a live agent is refused, not half-applied', async () => {
+  const harness = makeCtx(undefined)
+  plugin.apply(harness.ctx)
+  const applied = await harness.call('apply', {
+    sessionId: 'session-1', originSeq: 2, text: 'x', regenerate: true,
+  })
+  assert.equal(applied.ok, false)
+  assert.equal(applied.error.code, 'session-cold')
+})
+
+test('a plain edit never wakes the session and hides nothing', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 2, text: 'only an edit' })
+  assert.equal(applied.ok, true)
+  assert.deepEqual(applied.value.hidden, [])
+  assert.equal(applied.value.record.hiddenSeqs, undefined)
+  assert.equal(harness.followups.length, 0)
+  const listed = await harness.call('list', { sessionId: 'session-1' })
+  assert.equal(listed.value.edits[0].hiddenSeqs, undefined)
+})
+
+test('list reports the hidden replies of a regenerate after a reload', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  await harness.call('apply', { sessionId: 'session-1', originSeq: 2, text: 'edited', regenerate: true })
+
+  const listed = await harness.call('list', { sessionId: 'session-1' })
+  assert.equal(listed.value.edits.length, 1)
+  assert.equal(listed.value.edits[0].originSeq, 2)
+  assert.equal(listed.value.edits[0].text, 'edited')
+  assert.deepEqual(listed.value.edits[0].hiddenSeqs, [3])
+})
+
+test('regenerate is ignored for an assistant message', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  const applied = await harness.call('apply', {
+    sessionId: 'session-1', originSeq: 3, text: 'edited answer', regenerate: true,
+  })
+  assert.equal(applied.ok, true, JSON.stringify(applied))
+  // An assistant message has no reply run to replace, so the edit stays single-node.
+  assert.deepEqual(session.log.at(-1).surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
+  assert.equal(harness.followups.length, 0)
 })

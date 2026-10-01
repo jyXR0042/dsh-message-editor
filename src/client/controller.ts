@@ -35,6 +35,14 @@ export interface EditRecord {
   deferred: boolean
   /** The edited message's own id, so an action that only knows the id can match. */
   messageId?: string
+  /**
+   * Replies this edit removed from the model's view.
+   *
+   * A regenerate replaces the edited message together with the answers that
+   * followed it, so the transcript drops those nodes instead of leaving an
+   * answer the model can no longer see.
+   */
+  hiddenSeqs?: number[]
 }
 
 /** What the host reports for one message addressed by its durable id. */
@@ -65,6 +73,8 @@ export interface EditorView {
   status: EditorStatus
   /** Committed edit per append-origin seq. */
   edits: ReadonlyMap<number, EditRecord>
+  /** Every surface seq a regenerate removed, so a renderer can drop it. */
+  hidden: ReadonlySet<number>
   /** The open inline editor, if any. */
   editing: EditingState | null
   /** A mutation is in flight. */
@@ -79,29 +89,63 @@ export interface EditorView {
 export type EditorActionResult = { ok: true } | { ok: false; error: string }
 
 const EMPTY_EDITS: ReadonlyMap<number, EditRecord> = new Map()
+const EMPTY_HIDDEN: ReadonlySet<number> = new Set()
 
 const INITIAL_VIEW: EditorView = Object.freeze({
   status: 'cold',
   edits: EMPTY_EDITS,
+  hidden: EMPTY_HIDDEN,
   editing: null,
   pending: false,
   error: null,
   notice: null,
 })
 
+/** Collect every seq the committed edits removed from the model's view. */
+function hiddenOf(edits: ReadonlyMap<number, EditRecord>): ReadonlySet<number> {
+  const hidden = new Set<number>()
+  for (const record of edits.values()) {
+    for (const seq of record.hiddenSeqs ?? []) hidden.add(seq)
+  }
+  return hidden
+}
+
 const OK: EditorActionResult = Object.freeze({ ok: true })
 
-/** Translate one host failure code through the entry's dictionary. */
-function describe(t: (key: string) => string, code: string): string {
+/**
+ * Translate one host failure code through the entry's dictionary.
+ *
+ * The host's own message is appended rather than swallowed: an unrecognized code
+ * otherwise collapses to a generic line, and the one situation that produces one
+ * in practice — a browser half newer than the loaded host module — is worth
+ * naming outright.
+ * @param t - this plugin's translate seat.
+ * @param code - the host's failure code.
+ * @param detail - the host's own message, when it supplied one.
+ * @returns the line the editor or toast shows.
+ */
+function describe(t: (key: string) => string, code: string, detail: string): string {
+  const suffix = detail.length === 0 ? '' : ` (${detail})`
   switch (code) {
     case 'session-cold': return t('error.session-cold')
     case 'target-not-found': return t('error.target-not-found')
     case 'unsupported-target': return t('error.unsupported-target')
     case 'text-too-large': return t('error.text-too-large')
     case 'bad-request': return t('error.bad-request')
+    case 'compaction-busy': return t('error.compactionBusy')
+    case 'regenerate-failed': return t('error.regenerateFailed')
     case 'transport': return t('error.transport')
-    default: return t('error.generic')
+    // The host answered, but not with anything this build knows: its module is
+    // older than this browser half, which only a restart resolves.
+    case 'unknown-endpoint': return t('error.staleHost')
+    default: return `${t('error.generic')}${suffix}`
   }
+}
+
+/** Strip this plugin's own prefix from a host message before it reaches a user. */
+function cleanDetail(message: string | undefined): string {
+  if (typeof message !== 'string') return ''
+  return message.replace(/^message-editor:\s*/, '').trim()
 }
 
 /** One settled reply from the host channel. */
@@ -272,8 +316,27 @@ export class MessageEditorController {
     this.publish({ ...this.view, editing: { ...editing, removed } })
   }
 
-  /** Commit the open draft through the host. */
-  save = (): Promise<EditorActionResult> => {
+  /**
+   * Commit the open draft through the host.
+   *
+   * This is the editor's default verb: a cold edit that changes the conversation
+   * and nothing else. {@link saveAndRegenerate} is the explicit second choice.
+   * @returns the settled result.
+   */
+  save = (): Promise<EditorActionResult> => this.commitDraft(false)
+
+  /**
+   * Commit the draft and have the model answer it again.
+   *
+   * The host replaces the edited message together with the replies that
+   * followed it, then wakes the session, so the answer on screen is a fresh one
+   * rather than a second answer stacked under a stale one.
+   * @returns the settled result.
+   */
+  saveAndRegenerate = (): Promise<EditorActionResult> => this.commitDraft(true)
+
+  /** Shared body of the two commit verbs. */
+  private commitDraft(regenerate: boolean): Promise<EditorActionResult> {
     const editing = this.view.editing
     if (editing === null) return Promise.resolve(OK)
     const text = editing.text
@@ -287,6 +350,7 @@ export class MessageEditorController {
         originSeq: editing.originSeq,
         text,
         removed: [...editing.removed],
+        ...(regenerate ? { regenerate: true, instruction: this.t('regenerate.instruction') } : {}),
       })
       if (!result.ok) {
         this.publish({ ...this.view, error: result.error })
@@ -295,7 +359,11 @@ export class MessageEditorController {
       const record = (result.value as { record?: EditRecord } | undefined)?.record
       if (record !== undefined) this.commit(record)
       this.publish({ ...this.view, editing: null, error: null })
-      this.toast(this.t(record?.deferred === true ? 'badge.deferred' : 'notice.saved'))
+      this.toast(this.t(
+        regenerate
+          ? 'notice.regenerating'
+          : record?.deferred === true ? 'badge.deferred' : 'notice.saved',
+      ))
       return OK
     })
   }
@@ -310,7 +378,7 @@ export class MessageEditorController {
       }
       const edits = new Map(this.view.edits)
       edits.delete(originSeq)
-      this.publish({ ...this.view, edits, error: null })
+      this.publish({ ...this.view, edits, hidden: hiddenOf(edits), error: null })
       this.toast(this.t('notice.reverted'))
       return OK
     })
@@ -339,7 +407,7 @@ export class MessageEditorController {
         if (typeof record?.originSeq === 'number') edits.set(record.originSeq, record)
       }
     }
-    this.publish({ ...this.view, status: 'ready', edits, error: null })
+    this.publish({ ...this.view, status: 'ready', edits, hidden: hiddenOf(edits), error: null })
     return OK
   }
 
@@ -351,7 +419,7 @@ export class MessageEditorController {
       const envelope = await this.call(endpoint, payload)
       if (envelope?.ok === true) return { ok: true, value: envelope.value }
       const code = envelope?.error?.code ?? 'unknown'
-      return { ok: false, error: describe(this.t, code) }
+      return { ok: false, error: describe(this.t, code, cleanDetail(envelope?.error?.message)) }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return { ok: false, error: `${this.t('error.transport')} ${message}` }
@@ -382,7 +450,7 @@ export class MessageEditorController {
   private commit(record: EditRecord): void {
     const edits = new Map(this.view.edits)
     edits.set(record.originSeq, record)
-    this.publish({ ...this.view, edits })
+    this.publish({ ...this.view, edits, hidden: hiddenOf(edits) })
   }
 
   /** Show one transient toast line. */

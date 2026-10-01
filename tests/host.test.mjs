@@ -15,6 +15,7 @@ const { internals } = await import('../lib/host.js')
 const {
   surfaceOpOf, buildSurfaceIndex, applyText, dropAttachments, textOfContent,
   attachmentIds, listEdits, isEditReplacement, appendReplacement,
+  regenerateRange, regenerateTrigger,
 } = internals
 
 /** A minimal append-origin user message event. */
@@ -185,16 +186,91 @@ test('appendReplacement falls back across the shipped surface-op spellings', () 
       return { type, seq: 99, time: 1, data }
     },
   }
-  const event = appendReplacement(session, 4, 'assistant/message', { turn: 1, step: 1 })
+  const event = appendReplacement(session, 4, 4, [], 'assistant/message', { turn: 1, step: 1 })
   assert.equal(event.seq, 99)
   assert.equal(attempts.length, 2)
   assert.deepEqual(attempts[0].surfaceOp, { op: 'replace', startSeq: 4, endSeq: 4 })
   assert.equal(attempts[1].sourceEventSeqs, undefined)
 })
 
+test('appendReplacement cites every shadowed node of a range', () => {
+  let seen
+  const session = { append: (type, data, intent) => { seen = intent; return { type, seq: 9, time: 1, data } } }
+  appendReplacement(session, 4, 7, [5, 6], 'user/message', {})
+  assert.deepEqual(seen.surfaceOp, { op: 'replace', startSeq: 4, endSeq: 7 })
+  // Provenance must include both endpoints and everything between them.
+  assert.deepEqual([...seen.sourceEventSeqs].sort((a, b) => a - b), [4, 5, 6, 7])
+})
+
 test('appendReplacement reports the host error when every spelling fails', () => {
   const session = { append() { throw new Error('surface replace: start seq 4 not found in surface') } }
-  assert.throws(() => appendReplacement(session, 4, 'user/message', {}), /start seq 4 not found/)
+  assert.throws(() => appendReplacement(session, 4, 4, [], 'user/message', {}), /start seq 4 not found/)
+})
+
+// ---- regenerate -----------------------------------------------------------
+
+test('regenerateRange spans the reply run and nothing beyond it', () => {
+  // A question, a tool loop answering it, then the next user turn.
+  const toolResult = {
+    type: 'tool/result',
+    seq: 4,
+    time: 4,
+    surfaceOp: 'append',
+    data: {
+      turn: 1,
+      step: 1,
+      message: { id: 't1', role: 'user', content: [{ type: 'tool-result', toolCallId: 'c1', content: [] }], source: { kind: 'tool', callId: 'c1' }, toolCallId: 'c1' },
+    },
+  }
+  const events = [
+    userEvent(0, { text: 'question' }),
+    assistantEvent(1, { text: 'partial', withToolCall: true }),
+    toolResult,
+    assistantEvent(2, { text: 'answer' }),
+    userEvent(3, { text: 'next question' }),
+  ]
+  const range = regenerateRange(events, 0)
+  assert.equal(range.startSeq, 0)
+  // Ends at the answering step, not at the following user message.
+  assert.equal(range.endSeq, 2)
+  assert.deepEqual(range.hidden, [1, 4, 2])
+})
+
+test('regenerateRange stops at anything that is not a reply', () => {
+  // An injected context row sits between the question and the answer.
+  const contextRow = userEvent(1, { id: 'ctx1', text: 'reminder' })
+  const events = [userEvent(0, { text: 'question' }), contextRow, assistantEvent(2, { text: 'answer' })]
+  const range = regenerateRange(events, 0)
+  // Conservative on purpose: it never swallows a node it cannot classify.
+  assert.equal(range.endSeq, 0)
+  assert.deepEqual(range.hidden, [])
+})
+
+test('regenerateRange reports a message that is no longer on the surface', () => {
+  assert.equal(regenerateRange([userEvent(0)], 42), undefined)
+})
+
+test('regenerateTrigger is a plugin-sourced user message', () => {
+  const trigger = regenerateTrigger('please answer again', 3)
+  assert.equal(trigger.role, 'user')
+  assert.equal(trigger.source.kind, 'plugin')
+  assert.equal(trigger.source.plugin, 'message-editor')
+  assert.equal(trigger.content[0].text, 'please answer again')
+  assert.equal(typeof trigger.id, 'string')
+  assert.notEqual(regenerateTrigger('x', 4).id, trigger.id)
+})
+
+test('listEdits reports the nodes a regenerate hid', () => {
+  const original = userEvent(0, { text: 'question' })
+  const reply = assistantEvent(1, { text: 'answer' })
+  const regenerated = replacement(5, 'user/message', {
+    ...original.data,
+    content: [{ type: 'text', text: 'edited question' }],
+  }, 0, { endSeq: 1 })
+  const record = listEdits([original, reply, regenerated], new Map())[0]
+  assert.equal(record.originSeq, 0)
+  assert.equal(record.text, 'edited question')
+  assert.deepEqual(record.hiddenSeqs, [1])
 })
 
 test('textOfContent joins only text blocks', () => {

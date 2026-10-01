@@ -160,6 +160,11 @@ export function EditedAssistantStepView(props: NodeProps & AssistantNodeInjected
   const editing = select((view) => (view.editing !== null && view.editing.originSeq === originSeq ? view.editing : null)) ?? null
   const pending = select((view) => view.pending) === true
   const error = select((view) => view.error) ?? null
+  // A regenerate replaced this reply together with the question it answered, so
+  // the transcript drops it rather than showing an answer the model cannot see.
+  const hidden = select((view) => (originSeq === undefined ? false : view.hidden.has(originSeq))) === true
+
+  if (hidden) return null
 
   const data = node?.data ?? {}
   const blocks = Array.isArray(data['blocks']) ? (data['blocks'] as AssistantBlock[]) : []

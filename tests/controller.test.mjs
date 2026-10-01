@@ -146,15 +146,15 @@ test('save refuses an empty draft without calling the host', async () => {
 test('a host refusal keeps the editor open and shows the reason', async () => {
   const { controller } = makeController({
     list: () => ({ ok: true, value: { edits: [] } }),
-    apply: () => ({ ok: false, error: { code: 'compaction-busy' } }),
+    apply: () => ({ ok: false, error: { code: 'target-not-found' } }),
   })
   controller.begin({ originSeq: 1, kind: 'user', text: 'x', attachments: [] })
   const { save } = controller
   const result = await save()
   assert.equal(result.ok, false)
-  assert.equal(result.error, 'error.generic')
+  assert.equal(result.error, 'error.target-not-found')
   assert.notEqual(controller.getSnapshot().editing, null)
-  assert.equal(controller.getSnapshot().error, 'error.generic')
+  assert.equal(controller.getSnapshot().error, 'error.target-not-found')
 })
 
 test('a detached revert drops the record and calls the host', async () => {
@@ -179,6 +179,96 @@ test('a transport throw settles as a failure instead of rejecting', async () => 
   const result = await controller.ensure()
   assert.equal(result.ok, false)
   assert.match(result.error, /network down/)
+})
+
+// ---- regenerate and error reporting ---------------------------------------
+
+test('saveAndRegenerate asks the host to regenerate and sends the instruction', async () => {
+  const { controller, channel } = makeController({
+    list: () => ({ ok: true, value: { edits: [] } }),
+    apply: () => ({
+      ok: true,
+      value: {
+        regenerated: true,
+        hidden: [2],
+        record: { originSeq: 1, messageId: 'u1', kind: 'user', text: 'fixed', removed: [], editedAt: 9, deferred: false, hiddenSeqs: [2] },
+      },
+    }),
+  })
+  controller.begin({ originSeq: 1, kind: 'user', text: 'first', attachments: [] })
+  const { setText, saveAndRegenerate } = controller
+  setText('fixed')
+  assert.equal((await saveAndRegenerate()).ok, true)
+
+  const apply = channel.calls.find((call) => call.endpoint === 'apply')
+  assert.equal(apply.payload.regenerate, true)
+  assert.equal(apply.payload.instruction, 'regenerate.instruction')
+  assert.equal(controller.getSnapshot().notice, 'notice.regenerating')
+  // The replies the regenerate replaced are published as hidden.
+  assert.deepEqual([...controller.getSnapshot().hidden], [2])
+})
+
+test('a plain save sends no regenerate fields and hides nothing', async () => {
+  const { controller, channel } = makeController({
+    list: () => ({ ok: true, value: { edits: [] } }),
+    apply: () => ({ ok: true, value: { record: { originSeq: 1, kind: 'user', text: 'fixed', removed: [], editedAt: 9, deferred: false } } }),
+  })
+  controller.begin({ originSeq: 1, kind: 'user', text: 'first', attachments: [] })
+  const { save } = controller
+  await save()
+  const apply = channel.calls.find((call) => call.endpoint === 'apply')
+  assert.equal('regenerate' in apply.payload, false)
+  assert.equal('instruction' in apply.payload, false)
+  assert.equal(controller.getSnapshot().hidden.size, 0)
+})
+
+test('hidden replies are rebuilt from a reload, and cleared by a revert', async () => {
+  const routes = {
+    list: () => ({
+      ok: true,
+      value: {
+        edits: [
+          { originSeq: 1, messageId: 'u1', kind: 'user', text: 'edited', removed: [], editedAt: 1, deferred: false, hiddenSeqs: [2, 3] },
+          { originSeq: 5, messageId: 'u2', kind: 'user', text: 'other', removed: [], editedAt: 2, deferred: false },
+        ],
+      },
+    }),
+    revert: () => ({ ok: true, value: { reverted: true } }),
+  }
+  const { controller } = makeController(routes)
+  await controller.ensure()
+  assert.deepEqual([...controller.getSnapshot().hidden].sort((a, b) => a - b), [2, 3])
+  const { revert } = controller
+  await revert(1)
+  assert.equal(controller.getSnapshot().hidden.size, 0)
+})
+
+test('a stale host is named instead of collapsing to a generic failure', async () => {
+  // This is what an older host module answers a newer browser half with.
+  const { controller } = makeController({ list: () => ({ ok: false, error: { code: 'unknown-endpoint' } }) })
+  const result = await controller.ensure()
+  assert.equal(result.error, 'error.staleHost')
+})
+
+test('an unrecognized failure keeps the host message for diagnosis', async () => {
+  const { controller } = makeController({
+    list: () => ({ ok: false, error: { code: 'internal', message: 'message-editor: the target event could not be read' } }),
+  })
+  const result = await controller.ensure()
+  // The plugin's own prefix is stripped; the reason survives.
+  assert.match(result.error, /^error\.generic/)
+  assert.match(result.error, /the target event could not be read/)
+  assert.doesNotMatch(result.error, /message-editor:/)
+})
+
+test('a known compaction conflict reads as itself', async () => {
+  const { controller } = makeController({
+    list: () => ({ ok: true, value: { edits: [] } }),
+    apply: () => ({ ok: false, error: { code: 'compaction-busy' } }),
+  })
+  controller.begin({ originSeq: 1, kind: 'user', text: 'x', attachments: [] })
+  const { save } = controller
+  assert.equal((await save()).error, 'error.compactionBusy')
 })
 
 test('a disposed controller stops publishing', async () => {

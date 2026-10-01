@@ -13,8 +13,9 @@ Edit any past message in a [DeepSeek Harness](https://github.com/deepseek-ai/dee
 - **A pencil on every message.** Assistant replies carry one in the host's own action strip, next to copy / branch / rating. User messages carry one in their own bubble row. Both are the same 28px round ghost button the host uses, on `--dsw-alias-*` tokens, so they read as first-party chrome.
   - *Where to look:* the assistant pencil sits in the **turn footer row under a completed reply**, beside the copy button — the same row that holds branch and rating. That row follows the host's own reveal rule, so it may only appear when you hover the turn. User messages show their pencil directly under the bubble, next to copy.
 - **Edit in place.** The message body becomes an inline editor — a bordered card on the layer-1 surface, a capsule Save / Cancel pair, `Enter` to save, `Shift+Enter` for a newline, `Escape` to cancel. Nothing is regenerated, so nothing restarts, streams, or costs tokens.
+- **Regenerate after editing your own input.** Editing a user message adds a **Save & regenerate** action: it saves the edit *and* has the model answer the new text, with the old answer removed from both the transcript and the context — no second answer stacked under a stale one. Plain **Save** stays the default cold edit.
 - **Attachments too.** A user message's image and file chips are listed above the field; toggling one marks it removed, and saving drops that block from the message the model sees.
-- **Undo.** An edited message shows an `Edited` marker and a revert control that restores the logged original.
+- **Undo.** A cold-edited message shows an `Edited` marker and a revert control that restores the logged original. (A regenerate replaces the old answer and is not revertible.)
 - **Durable and reversible.** An edit is an append-only event in the session log, not a mutation. It survives reloads, resume, fork, and replay, and the original is never destroyed.
 
 ## How it works
@@ -27,8 +28,9 @@ The session log is append-only, and the harness renders two different views of i
 This plugin writes to the first and draws the second.
 
 1. **The rewrite is a surface replacement.** Editing appends a fresh `user/message` / `assistant/message` event carrying `surfaceOp: { op: 'replace', startSeq, endSeq }`, so the surface fold shadows the original node while the original stays in the log. This is the same mechanism context compaction and the tool-result pruner already use, and `Session.deriveMessages()` re-folds the log at the top of every model step — so **one append governs every later request**. No request-time interception exists for message history, and none is needed.
-2. **The transcript is drawn by shadowed renderers.** The `conversation.chat.node` cell is keyed, so this plugin takes `user`, `steering`, and `assistant-step`. The user bubble is drawn directly; the assistant step *delegates* to the shipped markdown renderer with a patched node, so unedited replies are byte-for-byte the stock UI and edited ones keep full markdown, code, and reasoning rendering.
-3. **The two halves talk over one authenticated route.** The host mounts an exact Fetch route on the connection's `/api` surface; the browser half calls it with a same-origin `fetch`, so every edit passes the same Host/Origin fence and browser authentication as the rest of the app. No generated Remote artifact, no zod contribution, no codegen.
+2. **The transcript is drawn by shadowed renderers.** The `conversation.chat.node` cell is keyed, so this plugin takes `user`, `steering`, `assistant-step`, and `context`. The user bubble is drawn directly; the assistant step *delegates* to the shipped markdown renderer with a patched node, so unedited replies are byte-for-byte the stock UI and edited ones keep full markdown, code, and reasoning rendering. Injected context rows delegate too; only this plugin's own trigger row is hidden.
+3. **Regenerate is one cross-node replacement plus one wake-up.** Save & regenerate submits a range that starts at the edited message and runs through every reply after it, stopping at the next user message — and only `assistant/message` and `tool/result` nodes extend it, so the range can only ever be too small, never too large. The stale answer, its tool results, and its tool calls therefore leave the model's view together and no tool pair is orphaned. The plugin then enqueues a plugin-sourced trigger message to wake the session; the `context` renderer hides that row, so the reader sees the edited question followed by the new answer.
+4. **The two halves talk over one authenticated route.** The host mounts an exact Fetch route on the connection's `/api` surface; the browser half calls it with a same-origin `fetch`, so every edit passes the same Host/Origin fence and browser authentication as the rest of the app. No generated Remote artifact, no zod contribution, no codegen.
 
 Rewriting is deliberately conservative, because the message history feeds real provider requests:
 
@@ -47,6 +49,8 @@ The plugin is a **bundle**: `package.json` declares `dsh.bundle.patch`, and that
 
 **Verify** — the Plugins page lists `dsh-message-editor` as enabled, and the pencil appears in the message actions.
 
+> **If an edit fails with "The plugin is older in the host process than in this page", that is this rule.** The browser half is re-served from disk and can hot-swap; the host half is a cached module. When the two generations differ, the page calls an endpoint the running host does not have yet. Restarting aligns them, and nothing is corrupted in the meantime.
+
 ### One restart is required after installing or updating
 
 A bundle that has *never* been loaded activates through HMR. **Replacing an already-installed package needs a process restart**, because the host half is a JavaScript module and the running process keeps the first generation it loaded in memory. This is documented harness behaviour, not a quirk of this plugin:
@@ -61,8 +65,9 @@ So after the first install of a *new version*, restart the app. On a fresh machi
 - **Assistant edits and step scope.** A `user/message` replacement is legal at any time, so a user-message edit is part of the very next request. An `assistant/message` replacement is step-scoped by the harness's own relational rules; the plugin applies it immediately when a step is open and otherwise stages it for the next model step, marking the message `Edited · applies next step`. In the shipped configuration the immediate path always succeeds, so staging is dormant.
 - **Text is one string.** Several text blocks in one message are collapsed into the first one on save; reasoning, image, file, and tool-call blocks keep their order and content. An edit can therefore move text relative to a tool call, which is intended, but it cannot reorder non-text blocks.
 - **Attachments are removable, not addable (yet).** Removing an attachment from a past message works today. Adding a brand-new file to a past message needs the upload pipeline and is deliberately out of scope for this version.
+- **Regenerate is offered for user messages only, and has no undo.** It supersedes the old answer: that answer stays in the append-only log, but neither the transcript nor the model context shows it again. Use plain **Save** when you want to keep both.
 - **One instance per harness.** The host mounts a fixed route path, so two copies of this plugin cannot be active at once.
-- **Built against `@deepseek-ai/dsh` 0.2.0-rc.2.** The plugin declares no `@deepseek-ai/dsh-*` peer dependencies — the harness gates those against its exact runtime version, and a wrong range rejects the install. It talks to the host only through `ctx.sessions` and `ctx.connection`, and tolerates both shipped spellings of `surfaceOp` (`startSeq`/`endSeq` and the older `start`/`end`), so it should keep working across nearby releases.
+- **Built against `@deepseek-ai/dsh` 0.2.0-rc.2.** The plugin declares no `@deepseek-ai/dsh-*` peer dependencies — the harness gates those against its exact runtime version, and a wrong range rejects the install. It talks to the host only through `ctx.sessions`, `ctx.agents`, and `ctx.connection`, and tolerates both shipped spellings of `surfaceOp` (`startSeq`/`endSeq` and the older `start`/`end`), so it should keep working across nearby releases.
 
 ## Develop
 
