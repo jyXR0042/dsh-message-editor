@@ -462,12 +462,16 @@ test('a regenerate edit spans the stale reply and wakes the session', async () =
   assert.deepEqual(applied.value.record.hiddenSeqs, [3])
   assert.deepEqual(applied.value.hidden, [3])
 
-  // And the session was woken with a plugin-sourced trigger, which the client's
+  // And the session was woken with a produced trigger, which the client's
   // `context` renderer hides.
   assert.equal(harness.followups.length, 1)
   const trigger = harness.followups[0]
   assert.equal(trigger.role, 'user')
-  assert.equal(trigger.source.plugin, 'message-editor')
+  // Session format v4 rejects a bare `plugin` kind ("requires a producer-owned
+  // source kind"), and the log would refuse the message, failing the turn that
+  // claims it.
+  assert.notEqual(trigger.source.kind, 'plugin')
+  assert.equal(trigger.source.kind, 'plugin:dsh-message-editor')
   assert.equal(trigger.content[0].text, 'answer again please')
 })
 

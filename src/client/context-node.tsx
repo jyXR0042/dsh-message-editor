@@ -29,9 +29,13 @@ export interface ContextNodeInjected {
  */
 export function EditedContextNodeView(props: NodeProps & ContextNodeInjected) {
   const data = props.node?.data ?? {}
-  const source = data['source'] as { kind?: string; plugin?: string } | undefined
-  // The trigger is this plugin's own bookkeeping, not conversation.
-  if (source?.kind === 'plugin' && source.plugin === (props.pluginId ?? 'dsh-message-editor')) return null
+  const source = data['source'] as { kind?: string } | undefined
+  // The trigger is this plugin's own bookkeeping, not conversation. Session
+  // format v4 spells a produced message's kind `plugin:<package name>`; the bare
+  // `plugin` wrapper is the retired v3 spelling and is tolerated so a log written
+  // by an earlier build still hides its own trigger.
+  const kind = source?.kind
+  if (kind === `plugin:${props.pluginId ?? 'dsh-message-editor'}` || kind === 'plugin') return null
 
   const builtin = props.builtinNode
   if (builtin === undefined || builtin === null || props.node === undefined) return null

@@ -15,7 +15,7 @@ const { internals } = await import('../lib/host.js')
 const {
   surfaceOpOf, buildSurfaceIndex, applyText, dropAttachments, textOfContent,
   attachmentIds, listEdits, isEditReplacement, appendReplacement,
-  regenerateRange, regenerateTrigger,
+  regenerateRange, regenerateTrigger, assertAdmissibleTrigger,
 } = internals
 
 /** A minimal append-origin user message event. */
@@ -236,12 +236,46 @@ test('regenerateRange spans the reply run and nothing beyond it', () => {
   assert.deepEqual(range.hidden, [1, 4, 2])
 })
 
-test('regenerateRange stops at anything that is not a reply', () => {
-  // An injected context row sits between the question and the answer.
-  const contextRow = userEvent(1, { id: 'ctx1', text: 'reminder' })
-  const events = [userEvent(0, { text: 'question' }), contextRow, assistantEvent(2, { text: 'answer' })]
+test('regenerateRange crosses the context rows a turn splices in', () => {
+  // The shape every real turn has: the reader's message, the runtime-context and
+  // skill-catalog rows the harness injects behind it, then the answer. Those rows
+  // are `user/message` events with a producer kind, and treating them as the next
+  // turn is what made a first version of this regenerate nothing at all.
+  const contextRow = userEvent(1, { id: 'ctx1', text: 'runtime context' })
+  contextRow.data.source = { kind: 'runtime-context', form: 'snapshot' }
+  const catalogRow = userEvent(2, { id: 'ctx2', text: 'skills' })
+  catalogRow.data.source = { kind: 'skill-catalog', form: 'catalog' }
+  const events = [
+    userEvent(0, { text: 'question' }),
+    contextRow,
+    catalogRow,
+    assistantEvent(3, { text: 'answer' }),
+  ]
   const range = regenerateRange(events, 0)
-  // Conservative on purpose: it never swallows a node it cannot classify.
+  assert.equal(range.startSeq, 0)
+  assert.equal(range.endSeq, 3)
+  assert.deepEqual(range.hidden, [1, 2, 3])
+})
+
+test('regenerateRange stops at the next message the reader wrote', () => {
+  const events = [
+    userEvent(0, { text: 'question' }),
+    assistantEvent(1, { text: 'answer' }),
+    userEvent(2, { text: 'next question' }),
+    assistantEvent(3, { text: 'next answer' }),
+  ]
+  const range = regenerateRange(events, 0)
+  assert.equal(range.endSeq, 1)
+  assert.deepEqual(range.hidden, [1])
+})
+
+test('regenerateRange stops at a node it cannot classify', () => {
+  const events = [
+    userEvent(0, { text: 'question' }),
+    { type: 'system/message', seq: 1, time: 1, surfaceOp: 'append', data: { message: { id: 's1', role: 'system', content: [{ type: 'text', text: 'prompt' }], source: { kind: 'system-prompt' } } } },
+    assistantEvent(2, { text: 'answer' }),
+  ]
+  const range = regenerateRange(events, 0)
   assert.equal(range.endSeq, 0)
   assert.deepEqual(range.hidden, [])
 })
@@ -250,14 +284,31 @@ test('regenerateRange reports a message that is no longer on the surface', () =>
   assert.equal(regenerateRange([userEvent(0)], 42), undefined)
 })
 
-test('regenerateTrigger is a plugin-sourced user message', () => {
+test('regenerateTrigger carries a source kind session format v4 accepts', () => {
   const trigger = regenerateTrigger('please answer again', 3)
   assert.equal(trigger.role, 'user')
-  assert.equal(trigger.source.kind, 'plugin')
-  assert.equal(trigger.source.plugin, 'message-editor')
+  // v4 refuses the bare `plugin` wrapper outright ("format v4 message requires a
+  // producer-owned source kind"); `plugin:<id>` is what its migrator writes.
+  assert.notEqual(trigger.source.kind, 'plugin')
+  assert.equal(trigger.source.kind, 'plugin:dsh-message-editor')
+  assert.equal('plugin' in trigger.source, false)
   assert.equal(trigger.content[0].text, 'please answer again')
   assert.equal(typeof trigger.id, 'string')
   assert.notEqual(regenerateTrigger('x', 4).id, trigger.id)
+  // The guard the host applies before enqueueing must accept it.
+  assert.doesNotThrow(() => assertAdmissibleTrigger(trigger))
+})
+
+test('assertAdmissibleTrigger refuses exactly what the format refuses', () => {
+  // The shape that killed a real turn: v4's retired v3 plugin wrapper.
+  assert.throws(
+    () => assertAdmissibleTrigger({ source: { kind: 'plugin', plugin: 'message-editor' } }),
+    /producer-owned source kind/,
+  )
+  assert.throws(() => assertAdmissibleTrigger({ source: { kind: '' } }), /producer-owned/)
+  assert.throws(() => assertAdmissibleTrigger({}), /producer-owned/)
+  assert.doesNotThrow(() => assertAdmissibleTrigger({ source: { kind: 'user' } }))
+  assert.doesNotThrow(() => assertAdmissibleTrigger({ source: { kind: 'plugin:anything' } }))
 })
 
 test('listEdits reports the nodes a regenerate hid', () => {
