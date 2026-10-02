@@ -1,30 +1,39 @@
 /**
- * The assistant edit control, contributed to the host's own per-message action
- * strip (`conversation.chat.assistant-actions`).
+ * The assistant "answer again" control, contributed to the host's own
+ * per-message action strip (`conversation.chat.assistant-actions`).
  *
  * This is the sanctioned placement: the strip already renders copy, branch and
- * the feedback pair between them, so the pencil inherits that row's geometry and
+ * the feedback pair between them, so the button inherits that row's geometry and
  * hover behaviour exactly — the same affordance the reference chat client puts
  * beside a message, drawn in the host's own chrome.
  *
+ * It used to be a pencil, and that was a lie. A model message cannot be rewritten
+ * on this session format: every surface replacement must cite the nodes it
+ * shadows in `sourceEventSeqs`, and `assistant/message` refuses to carry that
+ * field because it embeds its own source stream. The two rules together leave no
+ * legal spelling, so a saved "edit" could never reach the model — it was staged,
+ * reported as applied, and retried forever. What a reader actually wants from
+ * that control is for the reply to be said differently, and that IS reachable:
+ * the host retargets the request onto the message that opened the turn and
+ * replaces the whole reply run, which is the same operation the user-message
+ * editor's "Save & regenerate" already performs.
+ *
  * The strip's owner hands over a `messageId` and nothing else. Resolving that to
  * a surface node is the host's job, so this component reads no conversation
- * snapshot at all: it opens the editor through `beginForMessage` and matches the
- * edited state by id.
+ * snapshot at all.
  *
  * @module dsh-message-editor/client/assistant-action
  */
 
 import { createElement as h, useCallback } from 'react'
-import { IconEdit, IconRevert } from './icons.tsx'
-import type { EditRecord, EditorView } from './controller.ts'
+import { IconRegenerate } from './icons.tsx'
+import type { EditorView } from './controller.ts'
 
 /** The injected face available at the assistant action strip. */
 export interface ActionInjected {
   useEditor?: <S>(selector: (view: EditorView) => S) => S
   controller?: {
-    beginForMessage: (messageId: string) => Promise<unknown>
-    revert: (originSeq: number) => Promise<unknown>
+    regenerateTurn: (messageId: string) => Promise<unknown>
   }
   fallbackT: (key: string) => string
 }
@@ -38,59 +47,36 @@ export interface ActionProps extends ActionInjected {
 /** Selector default so the hook order never depends on wiring. */
 const NO_EDITOR = <S,>(_selector: (view: EditorView) => S): S | undefined => undefined
 
-/** The committed edit of one message id, if any. */
-function editOf(view: EditorView, messageId: string | undefined): EditRecord | undefined {
-  if (messageId === undefined) return undefined
-  for (const record of view.edits.values()) {
-    if (record.messageId === messageId) return record
-  }
-  return undefined
-}
-
 /**
- * Render the assistant strip's edit affordance.
+ * Render the assistant strip's regenerate affordance.
  * @param props - the addressed message and the injected face.
- * @returns the pencil, plus a revert control and badge once the message is edited.
+ * @returns the regenerate button, or nothing when there is no addressable message.
  */
-export function AssistantEditAction(props: ActionProps) {
+export function AssistantRegenerateAction(props: ActionProps) {
   const t = typeof props.t === 'function' ? props.t : (key: string) => props.fallbackT(key)
   const controller = props.controller
   const messageId = props.messageId
 
   const select = props.useEditor ?? NO_EDITOR
-  // The selector returns an existing record (or undefined), never a fresh value,
-  // so it stays uSES-safe across unrelated renders.
-  const edit = select((view) => editOf(view, messageId))
   const pending = select((view) => view.pending) === true
 
-  const onEdit = useCallback(() => {
+  const onRegenerate = useCallback(() => {
     if (messageId === undefined || controller === undefined) return
-    void controller.beginForMessage(messageId)
+    void controller.regenerateTurn(messageId)
   }, [controller, messageId])
 
   // The strip renders for one finalized message; without an addressable id there
-  // is nothing to edit, and rendering nothing keeps the row unchanged.
+  // is nothing to redo, and rendering nothing keeps the row unchanged.
   if (messageId === undefined || messageId === '' || controller === undefined) return null
 
   return h('div', { className: 'dme-actions' },
     h('button', {
       type: 'button',
       className: 'dme-action',
-      'data-message-editor': 'edit',
-      'data-active': edit !== undefined || undefined,
-      'aria-label': t('action.edit'),
-      title: t('action.edit'),
-      onClick: onEdit,
-    }, h(IconEdit)),
-    edit !== undefined && h('button', {
-      type: 'button',
-      className: 'dme-action',
-      'aria-label': t('action.revert'),
-      title: t('action.revert'),
+      'data-message-editor': 'regenerate',
+      'aria-label': t('action.regenerate'),
+      title: t('action.regenerateHint'),
       disabled: pending,
-      onClick: () => { void controller.revert(edit.originSeq) },
-    }, h(IconRevert)),
-    edit !== undefined && h('span', { className: 'dme-badge' },
-      h('span', { className: 'dme-badge-dot', 'aria-hidden': true }),
-      t(edit.deferred ? 'badge.deferred' : 'badge.edited')))
+      onClick: onRegenerate,
+    }, h(IconRegenerate)))
 }

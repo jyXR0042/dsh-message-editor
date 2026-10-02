@@ -183,6 +183,42 @@ test('a transport throw settles as a failure instead of rejecting', async () => 
 
 // ---- regenerate and error reporting ---------------------------------------
 
+test('regenerateTurn resolves the reply id on the host and asks for a fresh answer', async () => {
+  const { controller, channel } = makeController({
+    list: () => ({ ok: true, value: { edits: [] } }),
+    read: () => ({
+      ok: true,
+      value: { originSeq: 3, messageId: 'a1', kind: 'assistant', text: 'answer', attachments: [] },
+    }),
+    apply: () => ({
+      ok: true,
+      value: {
+        regenerated: true,
+        hidden: [3],
+        record: {
+          originSeq: 2, messageId: 'u1', kind: 'user', text: 'question',
+          removed: [], editedAt: 9, hiddenSeqs: [3],
+        },
+      },
+    }),
+  })
+  const { regenerateTurn } = controller
+  assert.equal((await regenerateTurn('a1')).ok, true)
+
+  // The strip is handed an id, so the host owns the id → seq resolution.
+  const read = channel.calls.find((call) => call.endpoint === 'read')
+  assert.equal(read.payload.messageId, 'a1')
+  const apply = channel.calls.find((call) => call.endpoint === 'apply')
+  assert.equal(apply.payload.regenerate, true)
+  assert.equal(apply.payload.originSeq, 3)
+  // No text: naming a turn without rewriting it means "answer this again", and
+  // the host reuses the question exactly as it stands.
+  assert.equal('text' in apply.payload, false)
+  assert.equal(controller.getSnapshot().notice, 'notice.regenerating')
+  // The replies the regenerate replaced are published as hidden.
+  assert.deepEqual([...controller.getSnapshot().hidden], [3])
+})
+
 test('saveAndRegenerate asks the host to regenerate and sends the instruction', async () => {
   const { controller, channel } = makeController({
     list: () => ({ ok: true, value: { edits: [] } }),

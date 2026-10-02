@@ -326,6 +326,44 @@ export class MessageEditorController {
   save = (): Promise<EditorActionResult> => this.commitDraft(false)
 
   /**
+   * Have the model answer one turn again.
+   *
+   * The caller names any message of the turn — the reply on screen is the usual
+   * one. The host resolves that to the message which opened the turn, because a
+   * model message cannot be rewritten on this session format, and replaces the
+   * whole reply run so no stale answer is left behind.
+   * @param messageId - the durable id the action strip was handed.
+   * @returns the settled result.
+   */
+  regenerateTurn = (messageId: string): Promise<EditorActionResult> => {
+    if (this.view.pending) return Promise.resolve(OK)
+    return this.mutate(async () => {
+      const read = await this.callHost('read', { sessionId: this.sessionId, messageId })
+      if (!read.ok) return this.report(read.error)
+      const originSeq = (read.value as { originSeq?: unknown } | undefined)?.originSeq
+      if (typeof originSeq !== 'number') return this.report(this.t('error.target-not-found'))
+      const result = await this.callHost('apply', {
+        sessionId: this.sessionId,
+        originSeq,
+        regenerate: true,
+        instruction: this.t('regenerate.instruction'),
+      })
+      if (!result.ok) return this.report(result.error)
+      const value = result.value as { record?: EditRecord } | undefined
+      if (value?.record !== undefined) this.commit(value.record)
+      this.publish({ ...this.view, editing: null, error: null })
+      this.toast(this.t('notice.regenerating'))
+      return OK
+    })
+  }
+
+  /** Publish one failure and hand it back to the caller. */
+  private report(error: string): EditorActionResult {
+    this.publish({ ...this.view, error })
+    return { ok: false, error }
+  }
+
+  /**
    * Commit the draft and have the model answer it again.
    *
    * The host replaces the edited message together with the replies that

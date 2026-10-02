@@ -19,7 +19,7 @@ import { createEditorChannel } from './channel.ts'
 import { EditedUserMessageView } from './user-node.tsx'
 import { EditedAssistantStepView } from './assistant-node.tsx'
 import { EditedContextNodeView } from './context-node.tsx'
-import { AssistantEditAction } from './assistant-action.tsx'
+import { AssistantRegenerateAction } from './assistant-action.tsx'
 import { NS, en, zh } from './locales.ts'
 import { installStyles } from './styles.ts'
 
@@ -317,7 +317,7 @@ export function apply(ctx: ClientContext): void {
     order: 5,
     inject: injectedFor,
     ...(hasLocale ? { locale: NS } : {}),
-  }, markShadow(AssistantEditAction)))
+  }, markShadow(AssistantRegenerateAction)))
 
   // ---- frame-wide toast ---------------------------------------------------
 

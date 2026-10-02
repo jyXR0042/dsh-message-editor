@@ -198,14 +198,10 @@ test('listEdits reports removed attachments by diffing against the original', ()
   assert.equal(records[0].text, 'keep one')
 })
 
-test('listEdits surfaces staged edits that are not in the log yet', () => {
-  const staged = new Map([
-    ['s1\u00000', { originSeq: 0, text: 'pending', removed: [], editedAt: 5 }],
-  ])
-  const records = listEdits([userEvent(0)], staged)
-  assert.equal(records.length, 1)
-  assert.equal(records[0].deferred, true)
-  assert.equal(records[0].text, 'pending')
+test('listEdits reports only what the log actually holds', () => {
+  // There is no staged tier any more: a replacement either lands in the log or the
+  // call fails, so a record can never describe an edit the model cannot see.
+  assert.deepEqual(listEdits([userEvent(0)]), [])
 })
 
 test('appendReplacement falls back across the shipped surface-op spellings', () => {

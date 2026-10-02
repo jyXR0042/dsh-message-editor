@@ -59,3 +59,14 @@ export const IconRevert = (props: IconProps) => svg(props,
   h('path', { key: 'a', d: 'M3 7.2h6.2a3.4 3.4 0 0 1 0 6.8H6.4' }),
   h('path', { key: 'b', d: 'M5.4 4.4 2.6 7.2l2.8 2.8' }),
 )
+
+/**
+ * Regenerate — answer this turn again.
+ *
+ * The circular arrow the host's own retry uses, so it reads as the familiar
+ * "do it once more" rather than as a new kind of control.
+ */
+export const IconRegenerate = (props: IconProps) => svg(props,
+  h('path', { key: 'a', d: 'M13.2 8a5.2 5.2 0 1 1-1.6-3.7' }),
+  h('path', { key: 'b', d: 'M13.4 2.6v3.6H9.8' }),
+)

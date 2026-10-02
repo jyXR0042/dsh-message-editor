@@ -184,7 +184,7 @@ test('apply rewrites a user message in place and leaves the original in the log'
 
   const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 2, text: 'edited question' })
   assert.equal(applied.ok, true, JSON.stringify(applied))
-  assert.equal(applied.value.deferred, false)
+  assert.equal(applied.value.regenerated, false)
   assert.equal(applied.value.record.text, 'edited question')
   assert.equal(applied.value.record.kind, 'user')
 
@@ -202,25 +202,22 @@ test('apply rewrites a user message in place and leaves the original in the log'
   assert.deepEqual(harness.flushed, ['session-1'])
 })
 
-test('apply preserves an assistant message tool calls and drops its usage', async () => {
+test('a model message is refused outright, and the log is left untouched', async () => {
+  // Session format v4 makes this a contradiction, not a policy: every replacement
+  // must cite the nodes it shadows, and `assistant/message` refuses to carry
+  // those citations. So the call must fail loudly rather than pretend — an
+  // earlier build staged the edit and reported success, and it could never flush.
   const session = seed()
   const harness = makeCtx(session)
   plugin.apply(harness.ctx)
+  const before = session.log.length
 
   const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 3, text: 'edited answer' })
-  assert.equal(applied.ok, true, JSON.stringify(applied))
-
-  const replacement = session.log.at(-1)
-  assert.equal(replacement.type, 'assistant/message')
-  assert.equal(replacement.data.message.content[0].text, 'edited answer')
-  // The tool call survives byte for byte, or its tool/result becomes an orphan.
-  assert.deepEqual(replacement.data.message.content[1], {
-    type: 'tool-call', id: 'call-1', name: 'bash', arguments: '{}',
-  })
-  assert.equal(replacement.data.message.id, 'a1')
-  assert.deepEqual(replacement.data.message.source, { kind: 'model', provider: 'p', model: 'm' })
-  // Re-stating a past step's usage would bill it twice.
-  assert.equal('usage' in replacement.data, false)
+  assert.equal(applied.ok, false)
+  assert.equal(applied.error.code, 'unsupported-target')
+  assert.match(applied.error.message, /cannot rewrite a model message/)
+  assert.equal(session.log.length, before)
+  assert.equal(harness.followups.length, 0)
 })
 
 test('a second edit chains onto the first replacement', async () => {
@@ -285,36 +282,48 @@ test('removing an attachment drops only that block', async () => {
   assert.deepEqual(content.map((block) => block.attachment?.attachmentId ?? block.text), ['look', 'i2'])
 })
 
-test('an idle assistant edit is staged and flushed from agent/request', async () => {
+test('a regenerate named at a reply is served from the question that opened the turn', async () => {
+  // A model message cannot be rewritten, so asking to redo one has to be answered
+  // from the reader's message: that is the only node a replacement may root at,
+  // and replacing the whole turn is the same range the reply-run rule covers.
   const session = seed()
-  session.assistantWritesAllowed = false
   const harness = makeCtx(session)
   plugin.apply(harness.ctx)
 
-  const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 3, text: 'staged answer' })
+  const applied = await harness.call('apply', {
+    sessionId: 'session-1', originSeq: 3, regenerate: true, instruction: 'do it again',
+  })
   assert.equal(applied.ok, true, JSON.stringify(applied))
-  assert.equal(applied.value.deferred, true)
-  assert.equal(applied.value.record.text, 'staged answer')
+  assert.equal(applied.value.regenerated, true)
 
-  // Reported as a pending edit while it waits for a model step.
-  const before = await harness.call('list', { sessionId: 'session-1' })
-  assert.equal(before.value.edits.length, 1)
-  assert.equal(before.value.edits[0].deferred, true)
+  const replacement = session.log.at(-1)
+  assert.equal(replacement.type, 'user/message')
+  assert.deepEqual(replacement.surfaceOp, { op: 'replace', startSeq: 2, endSeq: 3 })
+  // The question is reused verbatim, and the answer leaves the model's view.
+  assert.equal(replacement.data.content[0].text, 'original question')
+  assert.deepEqual(applied.value.hidden, [3])
+  assert.equal(harness.followups.length, 1)
+  assert.equal(harness.followups[0].content[0].text, 'do it again')
+})
 
-  // The next step opens: the flush lands it with the open step's coordinates.
-  session.assistantWritesAllowed = true
-  await harness.emit('agent/request', { agent: { session }, turn: 2, step: 1 }, () => Promise.resolve(undefined))
+test('a regenerate can leave the text out entirely', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 2, regenerate: true })
+  assert.equal(applied.ok, true, JSON.stringify(applied))
+  const replacement = session.log.at(-1)
+  assert.equal(replacement.data.content[0].text, 'original question')
+  assert.deepEqual(replacement.surfaceOp, { op: 'replace', startSeq: 2, endSeq: 3 })
+})
 
-  const last = session.log.at(-1)
-  assert.equal(last.type, 'assistant/message')
-  assert.equal(last.data.turn, 2)
-  assert.equal(last.data.step, 1)
-  assert.equal(last.data.message.content[0].text, 'staged answer')
-
-  const after = await harness.call('list', { sessionId: 'session-1' })
-  assert.equal(after.value.edits.length, 1)
-  assert.equal(after.value.edits[0].deferred, false)
-  assert.equal(after.value.edits[0].text, 'staged answer')
+test('an edit with no text at all is still a bad request', async () => {
+  const session = seed()
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 2 })
+  assert.equal(applied.ok, false)
+  assert.equal(applied.error.code, 'bad-request')
 })
 
 test('a compaction bracket blocks an edit instead of corrupting it', async () => {
@@ -383,13 +392,13 @@ test('read reports the edited text once the message has been rewritten', async (
   const session = seed()
   const harness = makeCtx(session)
   plugin.apply(harness.ctx)
-  await harness.call('apply', { sessionId: 'session-1', originSeq: 3, text: 'corrected answer' })
+  await harness.call('apply', { sessionId: 'session-1', originSeq: 2, text: 'corrected question' })
 
-  const after = await harness.call('read', { sessionId: 'session-1', messageId: 'a1' })
+  const after = await harness.call('read', { sessionId: 'session-1', messageId: 'u1' })
   assert.equal(after.ok, true, JSON.stringify(after))
   // The origin seq is stable across the rewrite, so the same id keeps resolving.
-  assert.equal(after.value.originSeq, 3)
-  assert.equal(after.value.text, 'corrected answer')
+  assert.equal(after.value.originSeq, 2)
+  assert.equal(after.value.text, 'corrected question')
 })
 
 test('read lists an attachment chip for every removable block', async () => {
@@ -511,22 +520,10 @@ test('list reports the hidden replies of a regenerate after a reload', async () 
   assert.deepEqual(listed.value.edits[0].hiddenSeqs, [3])
 })
 
-test('regenerate is ignored for an assistant message', async () => {
-  const session = seed()
-  const harness = makeCtx(session)
-  plugin.apply(harness.ctx)
-  const applied = await harness.call('apply', {
-    sessionId: 'session-1', originSeq: 3, text: 'edited answer', regenerate: true,
-  })
-  assert.equal(applied.ok, true, JSON.stringify(applied))
-  // An assistant message has no reply run to replace, so the edit stays single-node.
-  assert.deepEqual(session.log.at(-1).surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
-  assert.equal(harness.followups.length, 0)
-})
-
-test('editing a replay-carrying assistant message keeps the adapter able to use it', async () => {
+test('a replay-carrying model message cannot be edited either', async () => {
   // The shape the DeepSeek adapter writes: text, thinking, then more text, with
-  // index-aligned { type, signature } metadata beside it.
+  // index-aligned { type, signature } metadata beside it. `alignReplay` unit tests
+  // cover the realignment itself; this pins that the refusal is unconditional.
   const session = new FakeSession()
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 1 })
@@ -557,15 +554,6 @@ test('editing a replay-carrying assistant message keeps the adapter able to use 
   const harness = makeCtx(session)
   plugin.apply(harness.ctx)
   const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 2, text: 'corrected' })
-  assert.equal(applied.ok, true, JSON.stringify(applied))
-
-  const replacement = session.log.at(-1)
-  const message = replacement.data.message
-  assert.deepEqual(message.content.map((block) => block.type), ['text', 'reasoning'])
-  assert.equal(message.content[0].text, 'corrected')
-  // The adapter discards the whole envelope when either of these fails.
-  const blocks = message.source.replayState.blocks
-  assert.equal(blocks.length, message.content.length)
-  blocks.forEach((block, index) => assert.equal(block.type, message.content[index].type))
-  assert.equal(blocks[1].signature, 'sig-keep')
+  assert.equal(applied.ok, false)
+  assert.equal(applied.error.code, 'unsupported-target')
 })

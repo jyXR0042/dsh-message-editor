@@ -10,12 +10,13 @@ Edit any past message in a [DeepSeek Harness](https://github.com/deepseek-ai/dee
 
 ## What it does
 
-- **A pencil on every message.** Assistant replies carry one in the host's own action strip, next to copy / branch / rating. User messages carry one in their own bubble row. Both are the same 28px round ghost button the host uses, on `--dsw-alias-*` tokens, so they read as first-party chrome.
-  - *Where to look:* the assistant pencil sits in the **turn footer row under a completed reply**, beside the copy button — the same row that holds branch and rating. That row follows the host's own reveal rule, so it may only appear when you hover the turn. User messages show their pencil directly under the bubble, next to copy.
-- **Edit in place.** The message body becomes an inline editor — a bordered card on the layer-1 surface, a capsule Save / Cancel pair, `Enter` to save, `Shift+Enter` for a newline, `Escape` to cancel. Nothing is regenerated, so nothing restarts, streams, or costs tokens.
+- **Your own messages are editable in place.** A user message carries a pencil in its bubble row; the body becomes an inline editor — a bordered card on the layer-1 surface, a capsule Save / Cancel pair, `Enter` to save, `Shift+Enter` for a newline, `Escape` to cancel. Nothing is regenerated, so nothing restarts, streams, or costs tokens.
+- **A model reply can be regenerated.** Model replies carry a round-arrow button in the host's own action strip, next to copy / branch / rating — the same 28px ghost button on `--dsw-alias-*` tokens. Clicking it has the model answer that turn again, with the old answer removed from both the transcript and the context.
+
+  > **A model reply cannot be *rewritten*.** That is the session format's rule, not this plugin's choice: every surface replacement must cite the nodes it shadows in `sourceEventSeqs`, and `assistant/message` explicitly refuses to carry that field because it embeds its own source stream. The two rules together leave no legal spelling, so **rewriting a model message cannot take effect on this format**. An earlier build tried: the save looked successful, was marked "applies next step", and then failed to flush forever while the model kept seeing the original text. The call now fails with that reason spelled out instead of pretending. (Measured: across 30 real session logs, the number of assistant-message replacements is zero.)
 - **Regenerate after editing your own input.** Editing a user message adds a **Save & regenerate** action: it saves the edit *and* has the model answer the new text, with the old answer removed from both the transcript and the context — no second answer stacked under a stale one. Plain **Save** stays the default cold edit.
 - **Attachments too.** A user message's image and file chips are listed above the field; toggling one marks it removed, and saving drops that block from the message the model sees.
-- **Undo.** A cold-edited message shows an `Edited` marker and a revert control that restores the logged original. (A regenerate replaces the old answer and is not revertible.)
+- **Undo.** A cold-edited user message shows an `Edited` marker and a revert control that restores the logged original. (A regenerate replaces the old answer and is not revertible.)
 - **Durable and reversible.** An edit is an append-only event in the session log, not a mutation. It survives reloads, resume, fork, and replay, and the original is never destroyed.
 
 ## How it works
@@ -42,7 +43,7 @@ Rewriting is deliberately conservative, because the message history feeds real p
 
 ### Does the model know its words were changed?
 
-No, and that is the design. A model has no memory of its own beyond the context, and **the context is its memory**. After a rewrite the prompt contains only the corrected version, with nothing marking it as edited, so the agent can neither notice nor object: it treats the corrected text as what it said. That is precisely what a cold edit is for — the correction becomes the only version of the truth.
+No, and that is the design. A model has no memory of its own beyond the context, and **the context is its memory**. (This section applies to edits of your *own* messages; a model reply cannot be edited at all — see above.) After you rewrite your own input the prompt contains only the corrected version, with nothing marking it as edited, so the agent can neither notice nor object. That is precisely what a cold edit is for — the correction becomes the only version of the truth.
 
 Three things make it *look* unaware:
 
@@ -60,7 +61,7 @@ The plugin is a **bundle**: `package.json` declares `dsh.bundle.patch`, and that
 
 **From an agent session** — `plugin_manager` → `install_bundle` with the package directory, a git address, or an npm spec.
 
-**Verify** — the Plugins page lists `dsh-message-editor` as enabled, and the pencil appears in the message actions.
+**Verify** — the Plugins page lists `dsh-message-editor` as enabled; your own messages show a pencil, and model replies show a "Regenerate this turn" button in their action row.
 
 > **If an edit fails with "The plugin is older in the host process than in this page", that is this rule.** The browser half is re-served from disk and can hot-swap; the host half is a cached module. When the two generations differ, the page calls an endpoint the running host does not have yet. Restarting aligns them, and nothing is corrupted in the meantime.
 
