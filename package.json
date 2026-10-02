@@ -2,7 +2,7 @@
   "name": "dsh-message-editor",
   "version": "0.1.0",
   "private": true,
-  "description": "Edit any past message in a DeepSeek Harness conversation in place — cold edit, no regeneration. Text and attachments, for both user and assistant messages.",
+  "description": "Edit your own messages in a DeepSeek Harness conversation in place — cold edit, no regeneration, no token cost. Regenerate any turn, and remove attachments.",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -13,6 +13,15 @@
     "edit"
   ],
   "license": "MIT",
+  "author": "jyXR0042",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jyXR0042/dsh-message-editor.git"
+  },
+  "homepage": "https://github.com/jyXR0042/dsh-message-editor#readme",
+  "bugs": {
+    "url": "https://github.com/jyXR0042/dsh-message-editor/issues"
+  },
   "type": "module",
   "icon": "./icon.svg",
   "exports": {
