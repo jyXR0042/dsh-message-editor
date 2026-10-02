@@ -13,10 +13,43 @@ import { test } from 'node:test'
 const { internals } = await import('../lib/host.js')
 
 const {
-  surfaceOpOf, buildSurfaceIndex, applyText, dropAttachments, textOfContent,
-  attachmentIds, listEdits, isEditReplacement, appendReplacement,
+  surfaceOpOf, buildSurfaceIndex, applyText, alignReplay, dropAttachments, textOfContent,
+  attachmentIds, listEdits, isEditReplacement, appendReplacement, replacementData,
   regenerateRange, regenerateTrigger, assertAdmissibleTrigger,
 } = internals
+
+/** One assistant step carrying provider replay metadata, as the adapter writes it. */
+function replayAssistantEvent(seq, content, blocks) {
+  return {
+    type: 'assistant/message',
+    seq,
+    time: 1,
+    surfaceOp: 'append',
+    data: {
+      turn: 1,
+      step: 1,
+      message: {
+        id: `a${seq}`,
+        role: 'assistant',
+        content,
+        source: {
+          kind: 'model',
+          provider: 'deepseek-account',
+          model: 'deepseek-flash',
+          replayState: { response: { kind: 'deepseek-messages', version: 1, model: 'deepseek-flash' }, blocks },
+        },
+      },
+      usage: { inputTokens: 7, outputTokens: 9 },
+    },
+  }
+}
+
+/** The adapter's own acceptance rule for replay metadata, mirrored: index-aligned. */
+function replayIsUsable(message) {
+  const blocks = message.source.replayState.blocks
+  if (blocks.length !== message.content.length) return false
+  return blocks.every((block, index) => block.type === message.content[index].type)
+}
 
 /** A minimal append-origin user message event. */
 function userEvent(seq, { text = 'hello', id = `m${seq}`, attachments = [] } = {}) {
@@ -327,6 +360,95 @@ test('listEdits reports the nodes a regenerate hid', () => {
 test('textOfContent joins only text blocks', () => {
   assert.equal(textOfContent([{ type: 'text', text: 'a' }, { type: 'reasoning', text: 'r' }, { type: 'text', text: 'b' }]), 'ab')
   assert.equal(textOfContent(undefined), '')
+})
+
+// ---- provider replay metadata --------------------------------------------
+//
+// The DeepSeek adapter validates `source.replayState.blocks` by INDEX against
+// `message.content` and throws the whole envelope away on any mismatch. The text
+// never lives there — only thinking signatures do — so an edit that changes the
+// block count without realigning that array silently costs the model the native
+// reasoning continuity of the edited turn.
+
+test('an assistant edit keeps replay metadata index-aligned', () => {
+  const content = [
+    { type: 'text', text: 'first' },
+    { type: 'reasoning', text: 'because' },
+    { type: 'text', text: 'second' },
+  ]
+  const event = replayAssistantEvent(9, content, [
+    { type: 'text' },
+    { type: 'reasoning', signature: 'sig-1' },
+    { type: 'text' },
+  ])
+  const kept = []
+  const next = applyText(content, 'edited', kept)
+  // Two text blocks collapse to one; the reasoning block survives in place.
+  assert.deepEqual(kept, [0, 1])
+  const data = replacementData(event, next, undefined, kept)
+
+  assert.deepEqual(data.message.content, [
+    { type: 'text', text: 'edited' },
+    { type: 'reasoning', text: 'because' },
+  ])
+  assert.equal(replayIsUsable(data.message), true)
+  // The signature is what realignment exists to preserve.
+  assert.equal(data.message.source.replayState.blocks[1].signature, 'sig-1')
+  // And the accounting rule still holds.
+  assert.equal('usage' in data, false)
+})
+
+test('an assistant edit that has to synthesise a text block stays aligned', () => {
+  const content = [{ type: 'reasoning', text: 'because' }]
+  const event = replayAssistantEvent(4, content, [{ type: 'reasoning', signature: 'sig-2' }])
+  const kept = []
+  const next = applyText(content, 'now with words', kept)
+  assert.deepEqual(kept, [-1, 0])
+  const data = replacementData(event, next, undefined, kept)
+  assert.deepEqual(data.message.content.map((block) => block.type), ['text', 'reasoning'])
+  assert.equal(replayIsUsable(data.message), true)
+  assert.equal(data.message.source.replayState.blocks[1].signature, 'sig-2')
+})
+
+test('an edit that drops no blocks leaves the signatures exactly as they were', () => {
+  const content = [{ type: 'text', text: 'only one' }]
+  const blocks = [{ type: 'text' }]
+  const event = replayAssistantEvent(2, content, blocks)
+  const kept = []
+  const next = applyText(content, 'changed', kept)
+  const data = replacementData(event, next, undefined, kept)
+  assert.equal(data.message.content[0].text, 'changed')
+  assert.deepEqual(data.message.source.replayState.blocks, blocks)
+})
+
+test('a user message carries no replay metadata to realign', () => {
+  const kept = []
+  const content = applyText([{ type: 'text', text: 'hi' }], 'edited', kept)
+  const data = replacementData(userEvent(0), content, undefined, kept)
+  assert.equal('replayState' in (data.source ?? {}), false)
+  assert.equal(data.content[0].text, 'edited')
+})
+
+test('alignReplay refuses to invent signatures for a mismatched kind', () => {
+  const source = {
+    kind: 'model',
+    replayState: { response: { kind: 'deepseek-messages', version: 1 }, blocks: [{ type: 'reasoning', signature: 'sig-x' }] },
+  }
+  // Position 0 is now a text block, so the reasoning signature must not ride along.
+  const aligned = alignReplay(source, [0], [{ type: 'text', text: 'x' }])
+  assert.deepEqual(aligned.replayState.blocks, [{ type: 'text' }])
+  assert.equal(alignReplay({ kind: 'model' }, [0], [{ type: 'text', text: 'x' }]), undefined)
+})
+
+test('a v4 compaction checkpoint is not mistaken for an edit', () => {
+  const checkpoint = replacement(11, 'user/message', {
+    id: 'checkpoint',
+    role: 'user',
+    content: [{ type: 'text', text: 'summary of the conversation so far' }],
+    source: { kind: 'compact-checkpoint' },
+  }, 0)
+  assert.equal(isEditReplacement(checkpoint), false)
+  assert.deepEqual(listEdits([userEvent(0), checkpoint], new Map()), [])
 })
 
 /** A neutral filler event so seq numbering in the listing test stays honest. */

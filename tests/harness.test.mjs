@@ -523,3 +523,49 @@ test('regenerate is ignored for an assistant message', async () => {
   assert.deepEqual(session.log.at(-1).surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
   assert.equal(harness.followups.length, 0)
 })
+
+test('editing a replay-carrying assistant message keeps the adapter able to use it', async () => {
+  // The shape the DeepSeek adapter writes: text, thinking, then more text, with
+  // index-aligned { type, signature } metadata beside it.
+  const session = new FakeSession()
+  session.append('turn/start', { turn: 1 })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'a1',
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'first half' },
+        { type: 'reasoning', text: 'thinking' },
+        { type: 'text', text: 'second half' },
+      ],
+      source: {
+        kind: 'model',
+        provider: 'deepseek-account',
+        model: 'deepseek-flash',
+        replayState: {
+          response: { kind: 'deepseek-messages', version: 1, model: 'deepseek-flash' },
+          blocks: [{ type: 'text' }, { type: 'reasoning', signature: 'sig-keep' }, { type: 'text' }],
+        },
+      },
+    },
+    usage: { inputTokens: 3 },
+  }, { surfaceOp: 'append', sourceEventSeqs: [] })
+
+  const harness = makeCtx(session)
+  plugin.apply(harness.ctx)
+  const applied = await harness.call('apply', { sessionId: 'session-1', originSeq: 2, text: 'corrected' })
+  assert.equal(applied.ok, true, JSON.stringify(applied))
+
+  const replacement = session.log.at(-1)
+  const message = replacement.data.message
+  assert.deepEqual(message.content.map((block) => block.type), ['text', 'reasoning'])
+  assert.equal(message.content[0].text, 'corrected')
+  // The adapter discards the whole envelope when either of these fails.
+  const blocks = message.source.replayState.blocks
+  assert.equal(blocks.length, message.content.length)
+  blocks.forEach((block, index) => assert.equal(block.type, message.content[index].type))
+  assert.equal(blocks[1].signature, 'sig-keep')
+})

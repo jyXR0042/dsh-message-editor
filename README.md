@@ -37,7 +37,20 @@ Rewriting is deliberately conservative, because the message history feeds real p
 - every non-text block is preserved verbatim — above all an assistant message's `tool-call` blocks, or the paired `tool/result` messages become orphans and the provider rejects the next request;
 - an assistant replacement **drops `usage`**, since the token fold reads the raw log and would otherwise bill a past step twice;
 - message `id`, `role`, and `source` are kept, as the load path requires;
+- an assistant replacement **realigns `source.replayState.blocks` with the new content**: the adapter validates that array by index (matching length, matching `type` per position) and discards the whole envelope on any mismatch. It carries thinking signatures, not text, so misalignment costs the model that turn's reasoning continuity;
 - an edit is refused while a context compaction bracket is open.
+
+### Does the model know its words were changed?
+
+No, and that is the design. A model has no memory of its own beyond the context, and **the context is its memory**. After a rewrite the prompt contains only the corrected version, with nothing marking it as edited, so the agent can neither notice nor object: it treats the corrected text as what it said. That is precisely what a cold edit is for — the correction becomes the only version of the truth.
+
+Three things make it *look* unaware:
+
+1. **A gap inside a running turn.** The request is built before the `agent/request` waterfall, so editing while a step is in flight — mid-stream, or inside a tool loop — leaves that step's request carrying the old text. The edit reaches the model from the next step or turn.
+2. **Later messages still assert the old content.** Rewriting turn 3 does not rewrite turn 7's "as I said earlier". The model sees contradictory history and may follow either part.
+3. **Save & regenerate deletes the old answer from the model's view**, so it cannot even compare against what it used to say.
+
+Making the model aware would take an explicit note in its context; the plugin deliberately does not add one, because that turns a correction into a conversation event.
 
 ## Install
 
